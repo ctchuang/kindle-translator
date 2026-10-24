@@ -1,10 +1,18 @@
-// Service worker: captures the visible Kindle page, asks Claude to locate each
-// text block and translate it, then pushes the blocks to the page (overlay)
-// and the side panel.
+// Service worker: captures the visible Kindle page, finds and translates each
+// text block, then pushes the blocks to the page (overlay) and the side panel.
+// Two engines:
+// - "ocr": Tesseract reads the text and its positions locally, then Haiku
+//   translates the text alone. Fast, and the model never sees a book page.
+// - "vision": Opus reads the screenshot and translates it in one call.
 
-// Only Opus: in testing, Sonnet 5.5 and Haiku 5.5 declined to translate
-// screenshots of Kindle book pages (citing copyright) and returned no blocks.
+importScripts("ocr-layout.js");
+
+// Vision engine: only Opus. In testing, Sonnet 5.5 and Haiku 5.5 declined to
+// translate screenshots of Kindle book pages (citing copyright).
 const MODEL = "claude-opus-5-5";
+
+// OCR engine: translation of plain text.
+const TEXT_MODEL = "claude-haiku-5-5";
 
 // Server-side fallback when a safety classifier declines the request.
 // Opus 5.5 runs a biology classifier that Opus 5 doesn't, so "default"
@@ -17,6 +25,7 @@ const FALLBACK = {
 
 const DEFAULTS = {
   apiKey: "",
+  engine: "ocr",
   effort: "low",
   autoTranslate: true,
   targetLang: "繁體中文（台灣用語）",
@@ -32,7 +41,14 @@ const MAX_PIXELS = 3_700_000;
 
 const API_TIMEOUT_MS = 180_000;
 
-// Opus sometimes answers a page with a summary instead of a translation,
+// Part of the viewport OCR reads. Wider than CONTENT_CROP, which cuts off the
+// first line of a page, but still clear of the title bar, the footer and the
+// page arrows. Larger crops are scaled down: Tesseract's time grows with
+// pixels, and body text stays well above the size it needs.
+const OCR_CROP = { x0: 0.07, y0: 0.06, x1: 0.93, y1: 0.895 };
+const OCR_MAX_PIXELS = 5_000_000;
+
+// Claude sometimes answers a page with a summary instead of a translation,
 // citing copyright, and the same page often translates fine on the next
 // try. Retry that many times; after that show the summary, uncached.
 const SUMMARY_RETRIES = 1;
@@ -42,7 +58,7 @@ const READER_RE = /^https:\/\/read\.amazon\.(com|co\.jp|co\.uk|de|ca|com\.au)\//
 let panelPorts = new Set();
 let busy = false;
 let pending = null; // { force } of a request waiting for the current one
-let inflight = null; // AbortController of the current API call
+let inflight = null; // AbortController of the current translation (OCR and API calls)
 let inflightPage = null; // { hash, windowId } of the screen being translated
 
 // Chrome stops this service worker after ~30 s idle, wiping module state, so
@@ -278,6 +294,7 @@ async function translateActivePage({ force }) {
     await new Promise((r) => setTimeout(r, 80));
 
     const dataUrl = await capture(tab.windowId);
+    const capturedAt = Date.now();
     log(`截圖完成（${Math.round((dataUrl.length * 3) / 4 / 1024)} KB）`);
     const hash = await contentHash(dataUrl);
     const sameAsLast = (await swapLastHash(hash)) === hash;
@@ -303,13 +320,15 @@ async function translateActivePage({ force }) {
 
     broadcast({ type: "working", thumb: dataUrl });
     await setShownHash(null);
-    const image = await prepareImage(dataUrl);
-    log(`縮圖為 ${image.width}×${image.height}（${Math.round((image.base64.length * 3) / 4 / 1024)} KB）`);
+    const vision = settings.engine === "vision";
+    const image = await prepareImage(dataUrl, vision);
     inflightPage = { hash, windowId: tab.windowId };
+    inflight = new AbortController();
     let reply;
     try {
+      const translate = vision ? visionTranslator(settings, image) : await ocrTranslator(settings, dataUrl, image);
       for (let attempt = 0; ; attempt++) {
-        reply = await callClaude(settings, image);
+        reply = await translate();
         if (!isSummary(reply)) break;
         if (attempt >= SUMMARY_RETRIES) {
           log(`重試後仍然只給摘要，先顯示摘要（不存快取）：${reply.notes || "沒有說明"}`);
@@ -319,18 +338,19 @@ async function translateActivePage({ force }) {
       }
     } finally {
       inflightPage = null;
+      inflight = null;
     }
     const summary = isSummary(reply);
     const blocks = finishBlocks(reply.blocks, image);
-    log(`Claude 回傳 ${reply.blocks.length} 個區塊，可用 ${blocks.length} 個`);
+    log(`Claude 回傳 ${reply.blocks.length} 個區塊，可用 ${blocks.length} 個（從截圖起共 ${seconds(capturedAt)} 秒）`);
     if (reply.notes) log(`Claude 的說明：${reply.notes}`);
-    const fallbackModel = reply.model && reply.model !== MODEL ? reply.model : null;
+    const fallbackModel = reply.model && reply.model !== reply.requested ? reply.model : null;
     if (!blocks.length) {
       // Not cached: it may be a bad capture or a model quietly declining, and a
       // cached empty page would never be retried. Show what Claude was sent.
       const why = reply.notes || "沒有說明";
-      log(`沒有可用的區塊（${reply.model}；${why}），送出的截圖：`, `data:image/jpeg;base64,${image.base64}`);
-      broadcast({ type: "warn", text: `Claude 沒有回傳任何譯文區塊（${reply.model}）：${why}` });
+      log(`沒有可用的區塊（${reply.model}；${why}），這次的截圖：`, dataUrl);
+      broadcast({ type: "warn", text: `沒有任何譯文區塊（${reply.model}）：${why}` });
       return;
     }
     // A summary isn't cached, so revisiting the page asks for a translation again.
@@ -415,8 +435,9 @@ async function showOnPage(tabId, blocks, turn) {
 }
 
 // Downscale the screenshot to the size we send, and keep its pixels so we can
-// sample background / text colors for each block afterwards.
-async function prepareImage(dataUrl) {
+// sample background / text colors for each block afterwards. The JPEG is only
+// needed when the screenshot itself goes to Claude (vision engine).
+async function prepareImage(dataUrl, encode) {
   const bitmap = await createImageBitmap(await (await fetch(dataUrl)).blob());
   const scale = Math.min(
     1,
@@ -429,8 +450,11 @@ async function prepareImage(dataUrl) {
   const ctx = canvas.getContext("2d");
   ctx.drawImage(bitmap, 0, 0, width, height);
   const pixels = ctx.getImageData(0, 0, width, height).data;
+  if (!encode) return { width, height, pixels };
   const blob = await canvas.convertToBlob({ type: "image/jpeg", quality: 0.85 });
-  return { width, height, pixels, base64: bytesToBase64(new Uint8Array(await blob.arrayBuffer())) };
+  const base64 = bytesToBase64(new Uint8Array(await blob.arrayBuffer()));
+  log(`縮圖為 ${width}×${height}（${Math.round((base64.length * 3) / 4 / 1024)} KB）`);
+  return { width, height, pixels, base64 };
 }
 
 function bytesToBase64(bytes) {
@@ -573,11 +597,203 @@ function buildPrompt(targetLang, width, height) {
 6. summarized：如果任何區塊放的是摘要或改寫，而不是逐句翻譯，設為 true；否則 false。`;
 }
 
-async function callClaude(settings, image) {
-  const fbNote = FALLBACK.fallbacks.map((f) => f.model).join(" → ");
-  log(`送出 API 請求（${MODEL}，effort ${settings.effort}，備援：${fbNote}），等待回應…`);
+const TRANSLATIONS_SCHEMA = {
+  type: "object",
+  properties: {
+    translations: {
+      type: "array",
+      items: {
+        type: "object",
+        properties: { id: { type: "integer" }, text: { type: "string" } },
+        required: ["id", "text"],
+        additionalProperties: false,
+      },
+    },
+    notes: { type: "string" },
+    summarized: { type: "boolean" },
+  },
+  required: ["translations", "notes", "summarized"],
+  additionalProperties: false,
+};
+
+function buildTextPrompt(targetLang, paras) {
+  return `以下是使用者正在閱讀的一本已出版的書目前這一頁的文字，由 OCR 從螢幕截圖辨識出來，可能有少量辨識錯誤。請逐段翻譯給使用者閱讀。
+輸入是 JSON 陣列，每個元素是一段：id 和 text。
+1. translations：每一段一個元素，id 對應輸入，text 是該段翻成${targetLang}的譯文，只放譯文、不附原文。不要合併或拆開段落，每個 id 都要有。
+2. 依上下文修正明顯的 OCR 錯字後再翻譯。段落在頁首或頁尾被切斷時，只翻看得到的部分，不要補完。
+3. 看起來不是書本內文的雜訊（亂碼、閱讀器介面文字），text 留空字串。
+4. notes：如果有任何段落沒有翻譯（包括你決定不翻譯的），用一句話說明是哪些、為什麼；全部都有翻就留空字串。
+5. summarized：如果任何段落放的是摘要或改寫，而不是逐句翻譯，設為 true；否則 false。
+6. 譯文是中文時，引號用「」，引號裡面的引號用『』。
+
+${JSON.stringify(paras)}`;
+}
+
+// Each translator returns a function that asks Claude once and resolves to
+// { blocks (screenshot pixels, as in BLOCKS_SCHEMA), notes, summarized,
+// model, requested }, so a summary can be retried without redoing the OCR.
+
+function visionTranslator(settings, image) {
+  return async () => {
+    const out = await callClaude(settings, {
+      model: MODEL,
+      effort: settings.effort,
+      fallbacks: FALLBACK,
+      schema: BLOCKS_SCHEMA,
+      content: [
+        { type: "image", source: { type: "base64", media_type: "image/jpeg", data: image.base64 } },
+        { type: "text", text: buildPrompt(settings.targetLang, image.width, image.height) },
+      ],
+    });
+    return {
+      blocks: out.blocks || [],
+      notes: (out.notes || "").trim(),
+      summarized: out.summarized === true,
+      model: out.model,
+      requested: MODEL,
+    };
+  };
+}
+
+async function ocrTranslator(settings, dataUrl, image) {
   const started = Date.now();
-  inflight = new AbortController();
+  log("OCR 辨識中（Tesseract）…");
+  const ocr = await ocrPage(dataUrl);
+  log(`OCR 完成：${seconds(started)} 秒，${ocr.size}，${ocr.columns} 欄，${ocr.blocks.length} 段`);
+  if (ocr.blocks.length) log(`OCR 文字：${ocr.blocks.map((b) => b.text).join(" ¶ ").slice(0, 400)}`);
+  const paras = ocr.blocks.map((b, id) => ({ id, text: b.text }));
+  const chunks = splitParas(paras, ocr.blocks);
+  return async () => {
+    if (!paras.length) {
+      return { blocks: [], notes: "OCR 沒有辨識到任何文字", summarized: false, model: "tesseract", requested: "tesseract" };
+    }
+    // Output speed is the bottleneck, so translate the chunks side by side.
+    let outs;
+    try {
+      outs = await Promise.all(
+        chunks.map((chunk, i) => translateChunk(settings, chunk, chunks.length > 1 ? `[${i + 1}/${chunks.length}] ` : ""))
+      );
+    } catch (err) {
+      inflight?.abort(); // don't leave the other calls running
+      throw err;
+    }
+    const out = {
+      translations: outs.flatMap((o) => o.translations || []),
+      notes: outs.map((o) => (o.notes || "").trim()).filter(Boolean).join(" "),
+      summarized: outs.some((o) => o.summarized === true),
+      model: outs.find((o) => o.model !== TEXT_MODEL)?.model ?? outs[0].model, // shows when Opus stepped in
+    };
+    const byId = new Map(out.translations.map((t) => [t.id, t.text]));
+    return {
+      blocks: ocr.blocks.map((b, id) => ({
+        kind: b.kind,
+        lines: b.lines,
+        text: byId.get(id) || "",
+        x0: b.box[0] * image.width,
+        y0: b.box[1] * image.height,
+        x1: b.box[2] * image.width,
+        y1: b.box[3] * image.height,
+      })),
+      notes: (out.notes || "").trim(),
+      summarized: out.summarized === true,
+      model: out.model,
+      requested: TEXT_MODEL,
+    };
+  };
+}
+
+// Haiku sometimes declines a chunk (copyright) or answers with a summary.
+// Opus usually translates the same text, so hand it just that chunk instead of
+// retrying Haiku, which tends to decline again.
+async function translateChunk(settings, chunk, tag) {
+  const content = [{ type: "text", text: buildTextPrompt(settings.targetLang, chunk) }];
+  const out = await callClaude(settings, {
+    tag,
+    model: TEXT_MODEL,
+    effort: "low",
+    thinking: { type: "disabled" }, // a straight translation; thinking only adds latency
+    schema: TRANSLATIONS_SCHEMA,
+    content,
+  });
+  if (!isDeclined(out, chunk)) return out;
+  log(`${tag}${TEXT_MODEL} 沒有完整翻譯（${(out.notes || "").trim() || "沒有說明"}），這部分改用 ${MODEL}`);
+  return callClaude(settings, { tag, model: MODEL, effort: "low", fallbacks: FALLBACK, schema: TRANSLATIONS_SCHEMA, content });
+}
+
+// Fewer than half of the paragraphs translated, or flagged as a summary.
+function isDeclined(out, chunk) {
+  const done = (out.translations || []).filter((t) => t.text?.trim()).length;
+  return out.summarized === true || done < chunk.length / 2 || /摘要/.test(out.notes || "");
+}
+
+// Split a page into two requests: by column on a two-page spread, otherwise
+// in half by length. A page has a few hundred words, so more requests would
+// mostly add overhead.
+function splitParas(paras, blocks) {
+  if (paras.length < 4) return paras.length ? [paras] : [];
+  const firstRight = blocks.findIndex((b) => b.column > 0);
+  let cut = firstRight;
+  if (cut <= 0) {
+    const total = paras.reduce((n, p) => n + p.text.length, 0);
+    let seen = 0;
+    cut = paras.findIndex((p) => (seen += p.text.length) >= total / 2) + 1;
+  }
+  return [paras.slice(0, cut), paras.slice(cut)].filter((c) => c.length);
+}
+
+// Text paragraphs of the screenshot with boxes as viewport fractions.
+async function ocrPage(dataUrl) {
+  const bitmap = await createImageBitmap(await (await fetch(dataUrl)).blob());
+  const sx = bitmap.width * OCR_CROP.x0;
+  const sy = bitmap.height * OCR_CROP.y0;
+  const sw = bitmap.width * (OCR_CROP.x1 - OCR_CROP.x0);
+  const sh = bitmap.height * (OCR_CROP.y1 - OCR_CROP.y0);
+  const scale = Math.min(1, Math.sqrt(OCR_MAX_PIXELS / (sw * sh)));
+  const w = Math.round(sw * scale);
+  const h = Math.round(sh * scale);
+  const canvas = new OffscreenCanvas(w, h);
+  const ctx = canvas.getContext("2d");
+  ctx.drawImage(bitmap, sx, sy, sw, sh, 0, 0, w, h);
+  const rgba = ctx.getImageData(0, 0, w, h).data;
+  const gray = new Uint8Array(w * h);
+  for (let i = 0; i < gray.length; i++) gray[i] = (rgba[i * 4] * 299 + rgba[i * 4 + 1] * 587 + rgba[i * 4 + 2] * 114) / 1000;
+  const columns = findColumns({ width: w, height: h, data: gray });
+  const png = await canvas.convertToBlob({ type: "image/png" });
+  await ensureOffscreen();
+  const res = await chrome.runtime.sendMessage({
+    target: "offscreen",
+    type: "ocr",
+    image: `data:image/png;base64,${bytesToBase64(new Uint8Array(await png.arrayBuffer()))}`,
+    rects: columns.map(([x0, x1]) => ({ left: x0, top: 0, width: x1 - x0, height: h })),
+  });
+  if (!res || res.error) throw new Error(`OCR 失敗：${res?.error || "offscreen 文件沒有回應"}`);
+  const fx = (x) => (sx + x / scale) / bitmap.width;
+  const fy = (y) => (sy + y / scale) / bitmap.height;
+  const blocks = res.columns.flatMap((lines, column) =>
+    groupParagraphs(lines).map((b) => ({ ...b, column, box: [fx(b.x0), fy(b.y0), fx(b.x1), fy(b.y1)] }))
+  );
+  return { blocks, columns: columns.length, size: `${w}×${h}` };
+}
+
+let creatingOffscreen = null;
+
+async function ensureOffscreen() {
+  const open = await chrome.runtime.getContexts({ contextTypes: ["OFFSCREEN_DOCUMENT"] });
+  if (open.length) return;
+  creatingOffscreen ??= chrome.offscreen
+    .createDocument({ url: "offscreen.html", reasons: ["WORKERS"], justification: "Run Tesseract OCR in a Web Worker" })
+    .finally(() => (creatingOffscreen = null));
+  await creatingOffscreen;
+}
+
+// One streamed Messages API call with a JSON-schema answer. Returns the
+// parsed JSON plus the model that answered.
+// `tag` prefixes the log lines when several calls run at once.
+async function callClaude(settings, { model, effort, thinking, fallbacks, schema, content, tag = "" }) {
+  const log = (text) => broadcast({ type: "log", text: tag + text, at: Date.now() });
+  const fbNote = fallbacks ? `，備援：${fallbacks.fallbacks.map((f) => f.model).join(" → ")}` : "";
+  log(`送出 API 請求（${model}，effort ${effort}${fbNote}），等待回應…`);
+  const started = Date.now();
   let res;
   let body;
   try {
@@ -587,6 +803,7 @@ async function callClaude(settings, image) {
     // Without a timeout a hung request keeps `busy` set and blocks every
     // later page. The controller lets a manual retranslate cancel it.
     const signal = AbortSignal.any([inflight.signal, AbortSignal.timeout(API_TIMEOUT_MS)]);
+    signal.throwIfAborted(); // cancelled during OCR
     res = await fetch("https://api.anthropic.com/v1/messages", {
       method: "POST",
       signal,
@@ -594,40 +811,28 @@ async function callClaude(settings, image) {
         "content-type": "application/json",
         "x-api-key": settings.apiKey,
         "anthropic-version": "2023-06-01",
-        "anthropic-beta": FALLBACK.beta,
+        ...(fallbacks && { "anthropic-beta": fallbacks.beta }),
         // Required for calling the API directly from a browser context.
         "anthropic-dangerous-direct-browser-access": "true",
       },
       body: JSON.stringify({
-        model: MODEL,
+        model,
         max_tokens: 16000,
         stream: true,
-        output_config: {
-          effort: settings.effort,
-          format: { type: "json_schema", schema: BLOCKS_SCHEMA },
-        },
-        fallbacks: FALLBACK.fallbacks,
-        messages: [
-          {
-            role: "user",
-            content: [
-              { type: "image", source: { type: "base64", media_type: "image/jpeg", data: image.base64 } },
-              { type: "text", text: buildPrompt(settings.targetLang, image.width, image.height) },
-            ],
-          },
-        ],
+        ...(thinking && { thinking }),
+        output_config: { effort, format: { type: "json_schema", schema } },
+        ...(fallbacks && { fallbacks: fallbacks.fallbacks }),
+        messages: [{ role: "user", content }],
       }),
     });
     log(`API 開始回應：HTTP ${res.status}，${seconds(started)} 秒`);
     // Errors come back as plain JSON, not an event stream.
-    body = res.ok ? await readStream(res, started, signal) : await res.json().catch(() => ({}));
+    body = res.ok ? await readStream(res, started, signal, log) : await res.json().catch(() => ({}));
   } catch (err) {
     if (err.name === "AbortError") throw err; // cancelled by a manual retranslate or page turn
     if (err.name === "TimeoutError") throw new Error(`等候 Claude 回應超過 ${API_TIMEOUT_MS / 1000} 秒，已中止。`);
     if (err.apiError) throw err;
     throw new Error(`連不上 Claude API：${err.message}`);
-  } finally {
-    inflight = null;
   }
 
   const u = body.usage || {};
@@ -648,7 +853,7 @@ async function callClaude(settings, image) {
     // body.model differs from the requested model when a fallback answered.
     return { ...parseReply(body.content), model: body.model };
   } catch (_) {
-    throw new Error("無法解析 Claude 回傳的區塊資料。");
+    throw new Error("無法解析 Claude 回傳的 JSON。");
   }
 }
 
@@ -670,7 +875,7 @@ function parseReply(content = []) {
     if (cut < 0) throw err;
     out = JSON.parse(join(content.slice(cut + 1)));
   }
-  return { blocks: out.blocks || [], notes: (out.notes || "").trim(), summarized: out.summarized === true };
+  return out;
 }
 
 // Claude flags summaries itself; the text checks catch the times it says so
@@ -685,7 +890,7 @@ function isSummary(reply) {
 
 // Reassemble a Messages API event stream into the shape of a non-streamed
 // response: { model, content, stop_reason, stop_details, usage }.
-async function readStream(res, started, signal) {
+async function readStream(res, started, signal, log) {
   const msg = { content: [], usage: {} };
   const reader = res.body.pipeThrough(new TextDecoderStream()).getReader();
   // Stop reading on cancel/timeout; the check after the loop turns the early

@@ -1,4 +1,4 @@
-const FIELDS = { apiKey: "", effort: "low", targetLang: "繁體中文（台灣用語）" };
+const FIELDS = { apiKey: "", engine: "ocr", effort: "low", targetLang: "繁體中文（台灣用語）" };
 
 chrome.storage.sync.get(FIELDS).then((v) => {
   for (const k of Object.keys(FIELDS)) document.getElementById(k).value = v[k];
