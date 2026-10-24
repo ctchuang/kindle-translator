@@ -31,7 +31,7 @@ function stopTicker() {
 
 let lastLogAt = null;
 
-function addLog(text, at = Date.now(), isErr = false) {
+function addLog(text, at = Date.now(), isErr = false, image = null) {
   const line = document.createElement("div");
   const gap = lastLogAt ? ` +${((at - lastLogAt) / 1000).toFixed(1)}s` : "";
   lastLogAt = at;
@@ -39,6 +39,13 @@ function addLog(text, at = Date.now(), isErr = false) {
   const hms = t.toLocaleTimeString("zh-TW", { hour12: false }) + "." + String(t.getMilliseconds()).padStart(3, "0");
   line.textContent = `${hms}${gap}  ${text}`;
   if (isErr) line.className = "err";
+  if (image) {
+    const img = document.createElement("img");
+    img.src = image;
+    img.title = "點一下放大／縮小";
+    img.onclick = () => img.classList.toggle("big");
+    line.append(img);
+  }
   const atBottom = logEl.scrollHeight - logEl.scrollTop - logEl.clientHeight < 20;
   logEl.append(line);
   while (logEl.childElementCount > MAX_LOG_LINES) logEl.firstElementChild.remove();
@@ -65,7 +72,7 @@ function addPage(text, cached, fallbackModel) {
 }
 
 function onMessage(msg) {
-  if (msg.type === "log") addLog(msg.text, msg.at, /^失敗|沒有顯示|中斷|超過/.test(msg.text));
+  if (msg.type === "log") addLog(msg.text, msg.at, /^失敗|沒有顯示|沒有可用|中斷|超過/.test(msg.text), msg.image);
   if (msg.type === "working") startTicker();
   if (msg.type === "idle" && ticker) setStatus("");
   if (msg.type === "result") {

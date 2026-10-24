@@ -33,7 +33,8 @@ let inflight = null; // AbortController of the current API call
 // the page cache and last screenshot hash live in session storage (cleared
 // when the browser closes).
 async function cacheGet(hash) {
-  return (await chrome.storage.session.get(`page:${hash}`))[`page:${hash}`];
+  const blocks = (await chrome.storage.session.get(`page:${hash}`))[`page:${hash}`];
+  return blocks?.length ? blocks : undefined; // empty results were never meant to stick
 }
 
 async function cacheSet(hash, blocks) {
@@ -89,9 +90,10 @@ async function onOverlayChanged(on) {
   if (tab && READER_RE.test(tab.url || "")) await sendToPage(tab.id, { type: "clearOverlay" }).catch(() => {});
 }
 
-// Step-by-step trace shown at the bottom of the side panel.
-function log(text) {
-  broadcast({ type: "log", text, at: Date.now() });
+// Step-by-step trace shown at the bottom of the side panel. `image` (a data
+// URL) is shown as a thumbnail under the line.
+function log(text, image) {
+  broadcast({ type: "log", text, at: Date.now(), image });
 }
 
 function broadcast(msg) {
@@ -182,8 +184,17 @@ async function translateActivePage({ force, supersede = force }) {
     const reply = await callClaude(settings, image);
     const blocks = finishBlocks(reply.blocks, image);
     log(`Claude 回傳 ${reply.blocks.length} 個區塊，可用 ${blocks.length} 個`);
-    await cacheSet(hash, blocks);
+    if (reply.notes) log(`Claude 的說明：${reply.notes}`);
     const fallbackModel = reply.model && reply.model !== settings.model ? reply.model : null;
+    if (!blocks.length) {
+      // Not cached: it may be a bad capture or a model quietly declining, and a
+      // cached empty page would never be retried. Show what Claude was sent.
+      const why = reply.notes || "沒有說明";
+      log(`沒有可用的區塊（${reply.model}；${why}），送出的截圖：`, `data:image/jpeg;base64,${image.base64}`);
+      broadcast({ type: "warn", text: `Claude 沒有回傳任何譯文區塊（${reply.model}）：${why}` });
+      return;
+    }
+    await cacheSet(hash, blocks);
     broadcast({ type: "result", text: blocksToText(blocks), thumb: dataUrl, fallbackModel });
     if (settings.overlay) await showOnPage(tab.id, blocks, turn);
   } catch (err) {
@@ -387,17 +398,19 @@ const BLOCKS_SCHEMA = {
         additionalProperties: false,
       },
     },
+    notes: { type: "string" },
   },
-  required: ["blocks"],
+  required: ["blocks", "notes"],
   additionalProperties: false,
 };
 
 function buildPrompt(targetLang, width, height) {
-  return `這是 Kindle Cloud Reader 的一張螢幕截圖，大小 ${width}×${height} 像素。
+  return `這是 Kindle Cloud Reader 的一張螢幕截圖，大小 ${width}×${height} 像素。畫面上是使用者正在閱讀的一本已出版的書，請逐段翻譯給使用者閱讀。
 1. 找出截圖中書本內文的每個區塊：標題、段落、引文、清單項目、圖說、註腳各算一個區塊。忽略閱讀器介面、選單、頁碼、閱讀進度百分比；圖片和表格本身不要框。
 2. 每個區塊給出緊貼原文字的外框 x0, y0（左上）與 x1, y1（右下），單位是這張截圖的像素。雙頁或多欄時每欄分開框，不要一個框橫跨兩欄。
 3. text 是該區塊翻成${targetLang}的譯文，只放譯文、不附原文。區塊在頁首或頁尾被切斷時，只翻看得到的部分。
-4. 依閱讀順序排列。如果截圖中沒有書本內文（例如載入中或空白頁），回傳空的 blocks。`;
+4. 依閱讀順序排列。如果截圖中沒有書本內文（例如載入中或空白頁），回傳空的 blocks。
+5. notes：如果有任何看得到的內文沒有放進 blocks（包括你決定不翻譯的段落），用一句話說明是哪些、為什麼；全部都有放就留空字串。`;
 }
 
 // Server-side fallback when a safety classifier declines the request.
@@ -487,7 +500,7 @@ async function callClaude(settings, image) {
   if (body.stop_reason === "max_tokens") throw new Error("輸出被截斷（max_tokens），這一頁可能內容太多。");
   try {
     // body.model differs from the requested model when a fallback answered.
-    return { blocks: parseBlocks(body.content), model: body.model };
+    return { ...parseReply(body.content), model: body.model };
   } catch (_) {
     throw new Error("無法解析 Claude 回傳的區塊資料。");
   }
@@ -501,15 +514,17 @@ function seconds(since) {
 // stream keeps the declined model's partial text, then a `fallback` block,
 // then the fallback model's continuation; if the joined text doesn't parse,
 // try the part after the last fallback marker on its own.
-function parseBlocks(content = []) {
+function parseReply(content = []) {
   const join = (list) => list.filter((b) => b.type === "text").map((b) => b.text).join("");
+  let out;
   try {
-    return JSON.parse(join(content)).blocks || [];
+    out = JSON.parse(join(content));
   } catch (err) {
     const cut = content.map((b) => b.type).lastIndexOf("fallback");
     if (cut < 0) throw err;
-    return JSON.parse(join(content.slice(cut + 1))).blocks || [];
+    out = JSON.parse(join(content.slice(cut + 1)));
   }
+  return { blocks: out.blocks || [], notes: (out.notes || "").trim() };
 }
 
 // Reassemble a Messages API event stream into the shape of a non-streamed
