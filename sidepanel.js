@@ -67,6 +67,7 @@ function addPage(text, cached, fallbackModel) {
 function onMessage(msg) {
   if (msg.type === "log") addLog(msg.text, msg.at, /^失敗|沒有顯示|中斷|超過/.test(msg.text));
   if (msg.type === "working") startTicker();
+  if (msg.type === "idle" && ticker) setStatus("");
   if (msg.type === "result") {
     setStatus("");
     addPage(msg.text, msg.cached, msg.fallbackModel);

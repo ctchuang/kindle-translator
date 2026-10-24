@@ -26,7 +26,8 @@ const READER_RE = /^https:\/\/read\.amazon\.(com|co\.jp|co\.uk|de|ca|com\.au)\//
 
 let panelPorts = new Set();
 let busy = false;
-let pending = false;
+let pending = null; // { force } of a request waiting for the current one
+let inflight = null; // AbortController of the current API call
 
 // Chrome stops this service worker after ~30 s idle, wiping module state, so
 // the page cache and last screenshot hash live in session storage (cleared
@@ -68,7 +69,10 @@ chrome.runtime.onMessage.addListener(async (msg, sender) => {
   // Only translate when the panel is open, so we don't spend tokens silently.
   if (!autoTranslate || panelPorts.size === 0 || !sender.tab?.active) return;
   log(`偵測到翻頁（${msg.reason}）`);
-  translateActivePage({ force: false });
+  // Key / click / wheel / resize already made the page drop the in-flight
+  // overlay (its turn counter moved), so that request is wasted: cancel it.
+  // Plain DOM churn doesn't, so let that request finish.
+  translateActivePage({ force: false, supersede: msg.reason !== "dom" });
 });
 
 chrome.commands.onCommand.addListener((cmd) => {
@@ -107,13 +111,25 @@ async function sha256(str) {
   return [...new Uint8Array(buf)].map((b) => b.toString(16).padStart(2, "0")).join("");
 }
 
-async function translateActivePage({ force }) {
+async function translateActivePage({ force, supersede = force }) {
   if (busy) {
-    pending = true; // run once more after the current request finishes
-    log("前一個請求還沒結束，排隊等它完成後再檢查一次");
+    // Run once more after the current request finishes, keeping "force" if
+    // any queued trigger asked for it.
+    pending = { force: force || !!pending?.force };
+    if (supersede && inflight) {
+      // A manual retranslate or a page turn wins: cancel the running API call
+      // instead of waiting for it. Tokens it already used are still billed.
+      log(`${force ? "手動翻譯" : "已翻頁"}：取消進行中的請求，改翻目前畫面`);
+      inflight.abort();
+    } else {
+      log("前一個請求還沒結束，排隊等它完成後再檢查一次");
+    }
     return;
   }
   busy = true;
+  // Calling an extension API resets the service worker's 30 s idle timer;
+  // reading a response stream alone doesn't.
+  const keepAlive = setInterval(() => chrome.runtime.getPlatformInfo(), 20_000);
   try {
     const [tab] = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
     if (!tab || !READER_RE.test(tab.url || "")) {
@@ -171,14 +187,26 @@ async function translateActivePage({ force }) {
     broadcast({ type: "result", text: blocksToText(blocks), thumb: dataUrl, fallbackModel });
     if (settings.overlay) await showOnPage(tab.id, blocks, turn);
   } catch (err) {
-    broadcast({ type: "error", text: String(err.message || err) });
-    log(`失敗：${err.message || err}`);
+    if (err.name === "AbortError") {
+      // Forget this screen so the queued run doesn't skip it as "unchanged".
+      await chrome.storage.session.remove("lastHash");
+      log("已取消前一個請求");
+    } else {
+      broadcast({ type: "error", text: String(err.message || err) });
+      log(`失敗：${err.message || err}`);
+    }
   } finally {
+    clearInterval(keepAlive);
     busy = false;
     if (pending) {
-      pending = false;
+      const next = pending;
+      pending = null;
       log("處理排隊中的請求");
-      translateActivePage({ force: false });
+      translateActivePage(next);
+    } else {
+      // Lets the side panel stop its "translating… N s" timer even when this
+      // run ended without a result (cancelled, skipped).
+      broadcast({ type: "idle" });
     }
   }
 }
@@ -390,12 +418,19 @@ async function callClaude(settings, image) {
   const fbNote = fb ? `，備援：${Array.isArray(fb.fallbacks) ? fb.fallbacks.map((f) => f.model).join(" → ") : fb.fallbacks}` : "";
   log(`送出 API 請求（${settings.model}，effort ${settings.effort}${fbNote}），等待回應…`);
   const started = Date.now();
+  inflight = new AbortController();
   let res;
+  let body;
   try {
+    // Streamed: Chrome stops a service worker whose fetch() gets no response
+    // within 30 s, and a page often takes longer than that. With streaming the
+    // headers arrive right away and the content trickles in.
+    // Without a timeout a hung request keeps `busy` set and blocks every
+    // later page. The controller lets a manual retranslate cancel it.
+    const signal = AbortSignal.any([inflight.signal, AbortSignal.timeout(API_TIMEOUT_MS)]);
     res = await fetch("https://api.anthropic.com/v1/messages", {
       method: "POST",
-      // Without a timeout a hung request keeps `busy` set and blocks every later page.
-      signal: AbortSignal.timeout(API_TIMEOUT_MS),
+      signal,
       headers: {
         "content-type": "application/json",
         "x-api-key": settings.apiKey,
@@ -407,6 +442,7 @@ async function callClaude(settings, image) {
       body: JSON.stringify({
         model: settings.model,
         max_tokens: 16000,
+        stream: true,
         output_config: {
           effort: settings.effort,
           format: { type: "json_schema", schema: BLOCKS_SCHEMA },
@@ -423,15 +459,21 @@ async function callClaude(settings, image) {
         ],
       }),
     });
+    log(`API 開始回應：HTTP ${res.status}，${seconds(started)} 秒`);
+    // Errors come back as plain JSON, not an event stream.
+    body = res.ok ? await readStream(res, started, signal) : await res.json().catch(() => ({}));
   } catch (err) {
+    if (err.name === "AbortError") throw err; // cancelled by a manual retranslate or page turn
     if (err.name === "TimeoutError") throw new Error(`等候 Claude 回應超過 ${API_TIMEOUT_MS / 1000} 秒，已中止。`);
+    if (err.apiError) throw err;
     throw new Error(`連不上 Claude API：${err.message}`);
+  } finally {
+    inflight = null;
   }
 
-  const body = await res.json().catch(() => ({}));
   const u = body.usage || {};
   log(
-    `收到回應：HTTP ${res.status}，${((Date.now() - started) / 1000).toFixed(1)} 秒，` +
+    `回應結束：${seconds(started)} 秒，` +
       `stop_reason ${body.stop_reason ?? "-"}，模型 ${body.model ?? "-"}，` +
       `tokens 輸入 ${u.input_tokens ?? "-"} / 輸出 ${u.output_tokens ?? "-"}`
   );
@@ -443,14 +485,90 @@ async function callClaude(settings, image) {
   }
   if (body.stop_reason === "refusal") throw new Error(describeRefusal(body));
   if (body.stop_reason === "max_tokens") throw new Error("輸出被截斷（max_tokens），這一頁可能內容太多。");
-  const text = (body.content || [])
-    .filter((b) => b.type === "text")
-    .map((b) => b.text)
-    .join("");
   try {
     // body.model differs from the requested model when a fallback answered.
-    return { blocks: JSON.parse(text).blocks || [], model: body.model };
+    return { blocks: parseBlocks(body.content), model: body.model };
   } catch (_) {
     throw new Error("無法解析 Claude 回傳的區塊資料。");
   }
+}
+
+function seconds(since) {
+  return ((Date.now() - since) / 1000).toFixed(1);
+}
+
+// The JSON is the concatenated text blocks. After a mid-output fallback the
+// stream keeps the declined model's partial text, then a `fallback` block,
+// then the fallback model's continuation; if the joined text doesn't parse,
+// try the part after the last fallback marker on its own.
+function parseBlocks(content = []) {
+  const join = (list) => list.filter((b) => b.type === "text").map((b) => b.text).join("");
+  try {
+    return JSON.parse(join(content)).blocks || [];
+  } catch (err) {
+    const cut = content.map((b) => b.type).lastIndexOf("fallback");
+    if (cut < 0) throw err;
+    return JSON.parse(join(content.slice(cut + 1))).blocks || [];
+  }
+}
+
+// Reassemble a Messages API event stream into the shape of a non-streamed
+// response: { model, content, stop_reason, stop_details, usage }.
+async function readStream(res, started, signal) {
+  const msg = { content: [], usage: {} };
+  const reader = res.body.pipeThrough(new TextDecoderStream()).getReader();
+  // Stop reading on cancel/timeout; the check after the loop turns the early
+  // end into an AbortError / TimeoutError instead of a truncated message.
+  signal.addEventListener("abort", () => reader.cancel().catch(() => {}), { once: true });
+  let buf = "";
+  let firstText = true;
+  for (;;) {
+    const { value, done } = await reader.read();
+    signal.throwIfAborted();
+    if (done) break;
+    buf += value;
+    let sep;
+    while ((sep = buf.indexOf("\n\n")) >= 0) {
+      const chunk = buf.slice(0, sep);
+      buf = buf.slice(sep + 2);
+      const data = chunk
+        .split("\n")
+        .filter((l) => l.startsWith("data:"))
+        .map((l) => l.slice(5).trim())
+        .join("");
+      if (!data) continue;
+      const ev = JSON.parse(data);
+      switch (ev.type) {
+        case "message_start":
+          msg.model = ev.message.model;
+          Object.assign(msg.usage, ev.message.usage);
+          log(`串流開始：模型 ${msg.model}，${seconds(started)} 秒`);
+          break;
+        case "content_block_start":
+          msg.content[ev.index] = { ...ev.content_block };
+          if (ev.content_block.type === "fallback") log("此段被拒，改由備援模型接手");
+          break;
+        case "content_block_delta":
+          if (ev.delta.type === "text_delta") {
+            if (firstText) {
+              firstText = false;
+              log(`開始輸出譯文：${seconds(started)} 秒`);
+            }
+            msg.content[ev.index].text = (msg.content[ev.index].text || "") + ev.delta.text;
+          }
+          break;
+        case "message_delta":
+          msg.stop_reason = ev.delta.stop_reason;
+          msg.stop_details = ev.delta.stop_details ?? msg.stop_details;
+          Object.assign(msg.usage, ev.usage);
+          break;
+        case "error": {
+          const err = new Error(`Claude API 串流錯誤：${ev.error?.message || ev.error?.type}`);
+          err.apiError = true;
+          throw err;
+        }
+      }
+    }
+  }
+  return msg;
 }

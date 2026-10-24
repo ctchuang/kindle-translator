@@ -13,6 +13,7 @@ const IS_TOP = window.top === window;
 const TURN_MSG = "kindle-translator-turn";
 
 let timer = null;
+let pendingReason = null;
 
 // userAction: a key/click/wheel/resize that may have turned the page, so the
 // current overlay is stale. Plain DOM churn (toolbar fading, progress updates)
@@ -22,11 +23,17 @@ function notify(reason, userAction = true) {
     if (IS_TOP) onTurnHint();
     else window.top.postMessage({ type: TURN_MSG }, "*"); // reader content may live in an iframe
   }
+  // A page turn re-renders the page right after the click/key, so "dom" would
+  // otherwise overwrite the user action and the background wouldn't cancel the
+  // in-flight request.
+  if (userAction || !pendingReason) pendingReason = reason;
   clearTimeout(timer);
   // Wait for the page-turn animation and image rendering to settle.
   timer = setTimeout(() => {
+    const sent = pendingReason;
+    pendingReason = null;
     try {
-      chrome.runtime.sendMessage({ type: "pageTurned", reason });
+      chrome.runtime.sendMessage({ type: "pageTurned", reason: sent });
     } catch (_) {
       // Extension was reloaded; this content script is orphaned.
     }
