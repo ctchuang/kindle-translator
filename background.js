@@ -1,8 +1,9 @@
 // Service worker: captures the visible Kindle page, finds and translates each
 // text block, then pushes the blocks to the page (overlay) and the side panel.
 // Two engines:
-// - "ocr": Tesseract reads the text and its positions locally, then Haiku
-//   translates the text alone. Fast, and the model never sees a book page.
+// - "ocr": Tesseract reads the text and its positions locally, then Sonnet
+//   (or Haiku) translates the text alone. Fast, and the model never sees a
+//   book page.
 // - "vision": Opus reads the screenshot and translates it in one call.
 
 importScripts("ocr-layout.js");
@@ -11,8 +12,13 @@ importScripts("ocr-layout.js");
 // translate screenshots of Kindle book pages (citing copyright).
 const MODEL = "claude-opus-5-5";
 
-// OCR engine: translation of plain text.
-const TEXT_MODEL = "claude-haiku-5-5";
+// OCR engine: models for translating plain text, chosen in the options page,
+// with the lowest thinking setting each accepts (a straight translation;
+// thinking only adds latency). Sonnet 5.5 rejects "disabled".
+const TEXT_MODELS = {
+  "claude-sonnet-5-5": { type: "between_tools" },
+  "claude-haiku-5-5": { type: "disabled" },
+};
 
 // Server-side fallback when a safety classifier declines the request.
 // Opus 5.5 runs a biology classifier that Opus 5 doesn't, so "default"
@@ -26,6 +32,7 @@ const FALLBACK = {
 const DEFAULTS = {
   apiKey: "",
   engine: "ocr",
+  textModel: "claude-sonnet-5-5",
   effort: "low",
   autoTranslate: true,
   targetLang: "繁體中文（台灣用語）",
@@ -691,6 +698,7 @@ function visionTranslator(settings, image) {
 }
 
 async function ocrTranslator(settings, dataUrl, image) {
+  const textModel = textModelOf(settings);
   const started = Date.now();
   log("OCR 辨識中（Tesseract）…");
   const ocr = await ocrPage(dataUrl);
@@ -716,7 +724,7 @@ async function ocrTranslator(settings, dataUrl, image) {
       translations: outs.flatMap((o) => o.translations || []),
       notes: outs.map((o) => (o.notes || "").trim()).filter(Boolean).join(" "),
       summarized: outs.some((o) => o.summarized === true),
-      model: outs.find((o) => o.model !== TEXT_MODEL)?.model ?? outs[0].model, // shows when Opus stepped in
+      model: outs.find((o) => o.model !== textModel)?.model ?? outs[0].model, // shows when Opus stepped in
     };
     const byId = new Map(out.translations.map((t) => [t.id, t.text]));
     return {
@@ -732,27 +740,33 @@ async function ocrTranslator(settings, dataUrl, image) {
       notes: (out.notes || "").trim(),
       summarized: out.summarized === true,
       model: out.model,
-      requested: TEXT_MODEL,
+      requested: textModel,
     };
   };
 }
 
-// Haiku sometimes declines a chunk (copyright) or answers with a summary.
-// Opus usually translates the same text, so hand it just that chunk instead of
-// retrying Haiku, which tends to decline again.
+// The text model sometimes declines a chunk (copyright) or answers with a
+// summary; Haiku did in testing. Opus usually translates the same text, so
+// hand it just that chunk instead of retrying, which tends to decline again.
 async function translateChunk(settings, chunk, tag) {
+  const model = textModelOf(settings);
   const content = [{ type: "text", text: buildTextPrompt(settings.targetLang, chunk) }];
   const out = await callClaude(settings, {
     tag,
-    model: TEXT_MODEL,
+    model,
     effort: "low",
-    thinking: { type: "disabled" }, // a straight translation; thinking only adds latency
+    thinking: TEXT_MODELS[model],
     schema: TRANSLATIONS_SCHEMA,
     content,
   });
   if (!isDeclined(out, chunk)) return out;
-  log(`${tag}${TEXT_MODEL} 沒有完整翻譯（${(out.notes || "").trim() || "沒有說明"}），這部分改用 ${MODEL}`);
+  log(`${tag}${model} 沒有完整翻譯（${(out.notes || "").trim() || "沒有說明"}），這部分改用 ${MODEL}`);
   return callClaude(settings, { tag, model: MODEL, effort: "low", fallbacks: FALLBACK, schema: TRANSLATIONS_SCHEMA, content });
+}
+
+// The configured text model, or the default if the stored one is unknown.
+function textModelOf(settings) {
+  return settings.textModel in TEXT_MODELS ? settings.textModel : DEFAULTS.textModel;
 }
 
 // Fewer than half of the paragraphs translated, or flagged as a summary.

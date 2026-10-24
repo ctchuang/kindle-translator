@@ -22,10 +22,17 @@
 
   <label for="engine">辨識與翻譯方式</label>
   <select id="engine">
-    <option value="ocr">本機 OCR（Tesseract）＋ Claude Haiku 5.5 翻譯文字（快）</option>
+    <option value="ocr">本機 OCR（Tesseract）＋ Claude 翻譯文字（快）</option>
     <option value="vision">Claude Opus 5.5 直接看截圖翻譯（慢，排版辨識較好）</option>
   </select>
   <div class="hint">本機 OCR 只送文字給 Claude，不送截圖，目前只支援英文書。Opus 看截圖可以處理其他語言，但每頁要 20 秒以上，偶爾會以版權為由拒絕或只給摘要；實測 Sonnet 5.5、Haiku 5.5 看截圖會直接拒絕。</div>
+
+  <label for="textModel">翻譯模型（只用於本機 OCR 模式）</label>
+  <select id="textModel">
+    <option value="claude-sonnet-5-5">Claude Sonnet 5.5（譯文較好，一頁約 2 美分）</option>
+    <option value="claude-haiku-5-5">Claude Haiku 5.5（較快較便宜，一頁約 0.1 美分，較常拒絕）</option>
+  </select>
+  <div class="hint">某一欄被拒絕或只給摘要時，那一欄會自動改用 Opus 5.5。</div>
 
   <label for="effort">Opus 思考程度（effort，只用於截圖模式）</label>
   <select id="effort">

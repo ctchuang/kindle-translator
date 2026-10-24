@@ -2,11 +2,11 @@
 
 # Kindle Auto-Translate (Chrome extension prototype)
 
-Captures the page currently shown in Kindle Cloud Reader (read.amazon.com and others), reads each paragraph and its position with local OCR (Tesseract), and has Claude Haiku translate it into Traditional Chinese. The translation is drawn directly over the original text on the page, and also shown in Chrome's side panel.
+Captures the page currently shown in Kindle Cloud Reader (read.amazon.com and others), reads each paragraph and its position with local OCR (Tesseract), and has Claude Sonnet translate it into Traditional Chinese. The translation is drawn directly over the original text on the page, and also shown in Chrome's side panel.
 
 ![Example: page 8 of Ender's Game, with the translation of both pages laid over the original text and the side panel on the right](docs/example.png)
 
-> **Status: prototype, usable for everyday reading.** Tested on Kindle Cloud Reader's two-page layout: the translation covers the original text about 9 seconds after a page turn. Paragraphs are occasionally split wrongly, and boxes are occasionally a little off. When the overlay doesn't appear, the side panel's status line shows the reason in red, and the log below it shows each step.
+> **Status: prototype, usable for everyday reading.** Tested on Kindle Cloud Reader's two-page layout: with Haiku, the translation covers the original text about 9 seconds after a page turn (the default, Sonnet, is somewhat slower). Paragraphs are occasionally split wrongly, and boxes are occasionally a little off. When the overlay doesn't appear, the side panel's status line shows the reason in red, and the log below it shows each step.
 
 The extension's interface is in Chinese; the labels quoted below are followed by their English meaning. The target language can be changed in the options page.
 
@@ -30,7 +30,7 @@ The extension's interface is in Chinese; the labels quoted below are followed by
 - Pages are only translated automatically while the side panel is open, so no API credit is spent in the background.
 - A page is identified by a hash of its text area in the screenshot (excluding the title bar, progress bar and page arrows), so the same page is never sent twice; going back to a translated page uses the cache (cleared when the browser closes). If the screen changes mid-translation, the running request is cancelled and the new page is translated instead.
 - The options page offers two engines:
-  - **Local OCR + Haiku (default)**: Tesseract.js reads the text and its position in the browser (a two-page spread is first split into columns at the blank gutter), lines are grouped into paragraphs, and only the text is sent to Claude Haiku 5.5. On a two-page spread both columns are sent in parallel. About 9 seconds per page (OCR about 3); the screenshot never leaves your computer. Only the English OCR model is bundled for now. Haiku occasionally declines a column, citing copyright; that column is then translated as text by Opus 5.5 instead, about 15 seconds for the page.
+  - **Local OCR + Claude text translation (default)**: Tesseract.js reads the text and its position in the browser (a two-page spread is first split into columns at the blank gutter), lines are grouped into paragraphs, and only the text is sent to Claude. On a two-page spread both columns are sent in parallel. OCR takes about 3 seconds; the screenshot never leaves your computer. Only the English OCR model is bundled for now. The translation model defaults to Sonnet 5.5 (about 2 US cents per page); the options page can switch to Haiku 5.5 (about 0.1 cent per page and about 9 seconds, but it declines more often). The model occasionally declines a column, citing copyright; that column is then translated as text by Opus 5.5 instead, about 15 seconds for the page.
   - **Opus reads the screenshot**: the screenshot goes straight to Claude Opus 5.5, which finds the paragraphs and translates them. 20+ seconds per page, effort defaults to low. In testing, Sonnet 5.5 and Haiku 5.5 declined book-page screenshots on copyright grounds, so this mode uses Opus only. When a safety classifier declines Opus 5.5, the request is retried on Opus 5, then Opus 4.8.
 - The only server contacted is api.anthropic.com. The API key is kept in Chrome sync storage.
 - In Opus mode the screenshot is scaled to at most 2576 px on the long edge and 3.7 MP in total before sending; anything larger gets scaled again by the API and the coordinates no longer line up.
@@ -48,4 +48,4 @@ The extension's interface is in Chinese; the labels quoted below are followed by
 - `offscreen.html/js`: runs Tesseract in an offscreen document (a service worker can't start a Web Worker)
 - `vendor/tesseract/`: Tesseract.js 7.0.0, tesseract.js-core and the English model (Apache-2.0), all bundled in the extension rather than loaded from a CDN
 - `sidepanel.html/js`: side panel UI
-- `options.html/js`: options page (API key, engine, effort, target language)
+- `options.html/js`: options page (API key, engine, translation model, effort, target language)
