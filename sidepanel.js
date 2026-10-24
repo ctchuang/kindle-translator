@@ -32,6 +32,7 @@ port.onMessage.addListener((msg) => {
     setStatus("");
     addPage(msg.text, msg.cached);
   }
+  if (msg.type === "warn") setStatus(msg.text, true);
   if (msg.type === "error") {
     setStatus(msg.text, true);
     if (msg.needsKey) chrome.runtime.openOptionsPage();
