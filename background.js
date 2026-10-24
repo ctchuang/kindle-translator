@@ -11,17 +11,39 @@ const DEFAULTS = {
   overlay: true,
 };
 
-// Longest image edge we send. Within the model's limit, returned coordinates
-// map 1:1 to our pixels; above it the API would downscale and boxes would drift.
-const MAX_EDGE = { default: 2576, haiku: 1568 };
+// Image size we send. Within the model's limits, returned coordinates map 1:1
+// to our pixels; above either limit the API downscales again and every box
+// shrinks toward the top-left (seen: 2576×1593 = 4.1 MP came back at ~0.956×).
+// Pixel caps sit a little under the documented 3.75 MP / ~1.15 MP.
+const IMAGE_LIMITS = {
+  default: { maxEdge: 2576, maxPixels: 3_700_000 },
+  haiku: { maxEdge: 1568, maxPixels: 1_100_000 },
+};
+
+const API_TIMEOUT_MS = 180_000;
 
 const READER_RE = /^https:\/\/read\.amazon\.(com|co\.jp|co\.uk|de|ca|com\.au)\//;
 
 let panelPorts = new Set();
-let lastHash = null;
 let busy = false;
 let pending = false;
-const cache = new Map(); // screenshot hash -> blocks (session only)
+
+// Chrome stops this service worker after ~30 s idle, wiping module state, so
+// the page cache and last screenshot hash live in session storage (cleared
+// when the browser closes).
+async function cacheGet(hash) {
+  return (await chrome.storage.session.get(`page:${hash}`))[`page:${hash}`];
+}
+
+async function cacheSet(hash, blocks) {
+  await chrome.storage.session.set({ [`page:${hash}`]: blocks });
+}
+
+async function swapLastHash(hash) {
+  const { lastHash } = await chrome.storage.session.get("lastHash");
+  await chrome.storage.session.set({ lastHash: hash });
+  return lastHash;
+}
 
 chrome.runtime.onInstalled.addListener(() => {
   chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: true });
@@ -32,7 +54,11 @@ chrome.runtime.onConnect.addListener((port) => {
   panelPorts.add(port);
   port.onDisconnect.addListener(() => panelPorts.delete(port));
   port.onMessage.addListener((msg) => {
-    if (msg.type === "translateNow") translateActivePage({ force: true });
+    if (msg.type === "translateNow") {
+      log("手動翻譯：按下「翻譯這一頁」");
+      translateActivePage({ force: true });
+    }
+    if (msg.type === "overlayChanged") onOverlayChanged(msg.on);
   });
 });
 
@@ -40,12 +66,29 @@ chrome.runtime.onMessage.addListener(async (msg, sender) => {
   if (msg.type !== "pageTurned") return;
   const { autoTranslate } = await getSettings();
   // Only translate when the panel is open, so we don't spend tokens silently.
-  if (autoTranslate && panelPorts.size > 0 && sender.tab?.active) translateActivePage({ force: false });
+  if (!autoTranslate || panelPorts.size === 0 || !sender.tab?.active) return;
+  log(`偵測到翻頁（${msg.reason}）`);
+  translateActivePage({ force: false });
 });
 
 chrome.commands.onCommand.addListener((cmd) => {
-  if (cmd === "translate-page") translateActivePage({ force: true });
+  if (cmd !== "translate-page") return;
+  log("手動翻譯：Alt+T");
+  translateActivePage({ force: true });
 });
+
+// Side-panel switch. Off: remove the overlay now. On: re-capture; a cached
+// page shows its overlay right away without a new API call.
+async function onOverlayChanged(on) {
+  if (on) return translateActivePage({ force: false });
+  const [tab] = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
+  if (tab && READER_RE.test(tab.url || "")) await sendToPage(tab.id, { type: "clearOverlay" }).catch(() => {});
+}
+
+// Step-by-step trace shown at the bottom of the side panel.
+function log(text) {
+  broadcast({ type: "log", text, at: Date.now() });
+}
 
 function broadcast(msg) {
   for (const p of panelPorts) {
@@ -67,6 +110,7 @@ async function sha256(str) {
 async function translateActivePage({ force }) {
   if (busy) {
     pending = true; // run once more after the current request finishes
+    log("前一個請求還沒結束，排隊等它完成後再檢查一次");
     return;
   }
   busy = true;
@@ -89,39 +133,51 @@ async function translateActivePage({ force }) {
     if (settings.overlay) {
       try {
         turn = (await sendToPage(tab.id, { type: "clearOverlay" }))?.turn;
-      } catch (_) {
-        // Reported later by showOnPage; still translate for the side panel.
+        log("已清掉頁面上的覆蓋層");
+      } catch (err) {
+        // Reported again by showOnPage; still translate for the side panel.
+        log(`清除覆蓋層失敗：${err.message}`);
       }
     }
     await new Promise((r) => setTimeout(r, 80));
 
     const dataUrl = await chrome.tabs.captureVisibleTab(tab.windowId, { format: "jpeg", quality: 85 });
+    log(`截圖完成（${Math.round((dataUrl.length * 3) / 4 / 1024)} KB）`);
     const hash = await sha256(dataUrl);
-    const sameAsLast = hash === lastHash;
-    lastHash = hash;
+    const sameAsLast = (await swapLastHash(hash)) === hash;
 
-    if (cache.has(hash)) {
-      const blocks = cache.get(hash);
+    const cached = await cacheGet(hash);
+    if (cached) {
+      const blocks = cached;
+      log(`命中快取（${blocks.length} 個區塊），不呼叫 API`);
       // Same screen re-captured (e.g. after a stray DOM change): just restore the overlay.
       if (force || !sameAsLast) broadcast({ type: "result", text: blocksToText(blocks), cached: true, thumb: dataUrl });
       if (settings.overlay) await showOnPage(tab.id, blocks, turn);
       return;
     }
-    if (!force && sameAsLast) return; // page didn't actually change
+    if (!force && sameAsLast) {
+      log("畫面跟上次一樣，略過");
+      return;
+    }
 
     broadcast({ type: "working", thumb: dataUrl });
     const image = await prepareImage(dataUrl, settings.model);
-    const raw = await callClaude(settings, image);
-    const blocks = finishBlocks(raw, image);
-    cache.set(hash, blocks);
-    broadcast({ type: "result", text: blocksToText(blocks), thumb: dataUrl });
+    log(`縮圖為 ${image.width}×${image.height}（${Math.round((image.base64.length * 3) / 4 / 1024)} KB）`);
+    const reply = await callClaude(settings, image);
+    const blocks = finishBlocks(reply.blocks, image);
+    log(`Claude 回傳 ${reply.blocks.length} 個區塊，可用 ${blocks.length} 個`);
+    await cacheSet(hash, blocks);
+    const fallbackModel = reply.model && reply.model !== settings.model ? reply.model : null;
+    broadcast({ type: "result", text: blocksToText(blocks), thumb: dataUrl, fallbackModel });
     if (settings.overlay) await showOnPage(tab.id, blocks, turn);
   } catch (err) {
     broadcast({ type: "error", text: String(err.message || err) });
+    log(`失敗：${err.message || err}`);
   } finally {
     busy = false;
     if (pending) {
       pending = false;
+      log("處理排隊中的請求");
       translateActivePage({ force: false });
     }
   }
@@ -135,12 +191,18 @@ async function sendToPage(tabId, msg) {
     // Tabs opened before the extension was (re)loaded have no live content
     // script. Inject one and retry once.
     if (!/Receiving end does not exist/.test(err.message)) throw err;
+    log("頁面沒有 content script，重新注入");
     await chrome.scripting.executeScript({ target: { tabId, frameIds: [0] }, files: ["content.js"] });
     return await chrome.tabs.sendMessage(tabId, msg, { frameId: 0 });
   }
 }
 
 async function showOnPage(tabId, blocks, turn) {
+  // The switch may have been turned off while the request was in flight.
+  if (!(await getSettings()).overlay) {
+    log("覆蓋層開關已關閉，不畫");
+    return;
+  }
   let res;
   try {
     res = await sendToPage(tabId, { type: "overlay", blocks, turn });
@@ -148,15 +210,24 @@ async function showOnPage(tabId, blocks, turn) {
     broadcast({ type: "warn", text: `譯文沒辦法疊到頁面上（${err.message}）。請重新整理 Kindle 分頁再試。` });
     return;
   }
-  if (!res?.shown) broadcast({ type: "warn", text: `覆蓋層沒有顯示：${res?.reason || "頁面沒有回應"}` });
+  if (!res?.shown) {
+    broadcast({ type: "warn", text: `覆蓋層沒有顯示：${res?.reason || "頁面沒有回應"}` });
+    log(`覆蓋層沒有顯示：${res?.reason || "頁面沒有回應"}`);
+  } else {
+    log(`覆蓋層已畫上 ${blocks.length} 個區塊`);
+  }
 }
 
 // Downscale the screenshot to the size we send, and keep its pixels so we can
 // sample background / text colors for each block afterwards.
 async function prepareImage(dataUrl, model) {
   const bitmap = await createImageBitmap(await (await fetch(dataUrl)).blob());
-  const maxEdge = model.includes("haiku") ? MAX_EDGE.haiku : MAX_EDGE.default;
-  const scale = Math.min(1, maxEdge / Math.max(bitmap.width, bitmap.height));
+  const { maxEdge, maxPixels } = model.includes("haiku") ? IMAGE_LIMITS.haiku : IMAGE_LIMITS.default;
+  const scale = Math.min(
+    1,
+    maxEdge / Math.max(bitmap.width, bitmap.height),
+    Math.sqrt(maxPixels / (bitmap.width * bitmap.height))
+  );
   const width = Math.round(bitmap.width * scale);
   const height = Math.round(bitmap.height * scale);
   const canvas = new OffscreenCanvas(width, height);
@@ -242,6 +313,33 @@ function blocksToText(blocks) {
   return blocks.map((b) => b.text).join("\n\n") || "（此頁無內文）";
 }
 
+const REFUSAL_CATEGORIES = {
+  cyber: "網路安全",
+  bio: "生物安全",
+  frontier_llm: "協助開發競爭的 AI 模型",
+  reasoning_extraction: "要求輸出內部推理",
+  general_harms: "其他使用政策",
+};
+
+// stop_details is informational and any field may be missing or null.
+function describeRefusal(body) {
+  const d = body.stop_details || {};
+  const parts = [];
+  if (d.category) parts.push(`類別：${REFUSAL_CATEGORIES[d.category] || d.category}（${d.category}）`);
+  else parts.push("沒有分類（可能是模型本身拒絕，而不是安全分類器）");
+  if (d.explanation) parts.push(`說明：${d.explanation}`);
+  // A model's own refusal may come with text saying why.
+  const said = (body.content || [])
+    .filter((b) => b.type === "text")
+    .map((b) => b.text)
+    .join("")
+    .trim();
+  if (said) parts.push(`模型回覆：${said.slice(0, 300)}`);
+  if (d.recommended_model) parts.push(`建議改用：${d.recommended_model}`);
+  parts.push(`模型：${body.model || "未知"}`);
+  return "Claude 拒絕處理這一頁。\n" + parts.join("\n");
+}
+
 const BLOCKS_SCHEMA = {
   type: "object",
   properties: {
@@ -274,54 +372,84 @@ function buildPrompt(targetLang, width, height) {
 4. 依閱讀順序排列。如果截圖中沒有書本內文（例如載入中或空白頁），回傳空的 blocks。`;
 }
 
+// Server-side fallback when a safety classifier declines the request.
+// Opus 5.5 runs a biology classifier that Opus 5 doesn't, so "default"
+// routing can leave benign pages (e.g. a history of biological warfare)
+// declined; naming Opus 5 / Opus 4.8 explicitly retries them there.
+// Sonnet 5.5 only accepts "default"; Haiku 5.5 has no server-side fallback.
+function fallbackConfig(model) {
+  if (model === "claude-opus-5-5") {
+    return { beta: "server-side-fallback-2026-06-01", fallbacks: [{ model: "claude-opus-5" }, { model: "claude-opus-4-8" }] };
+  }
+  if (model === "claude-sonnet-5-5") return { beta: "server-side-fallback-2026-07-01", fallbacks: "default" };
+  return null;
+}
+
 async function callClaude(settings, image) {
-  const res = await fetch("https://api.anthropic.com/v1/messages", {
-    method: "POST",
-    headers: {
-      "content-type": "application/json",
-      "x-api-key": settings.apiKey,
-      "anthropic-version": "2023-06-01",
-      "anthropic-beta": "server-side-fallback-2026-07-01",
-      // Required for calling the API directly from a browser context.
-      "anthropic-dangerous-direct-browser-access": "true",
-    },
-    body: JSON.stringify({
-      model: settings.model,
-      max_tokens: 16000,
-      output_config: {
-        effort: settings.effort,
-        format: { type: "json_schema", schema: BLOCKS_SCHEMA },
+  const fb = fallbackConfig(settings.model);
+  const fbNote = fb ? `，備援：${Array.isArray(fb.fallbacks) ? fb.fallbacks.map((f) => f.model).join(" → ") : fb.fallbacks}` : "";
+  log(`送出 API 請求（${settings.model}，effort ${settings.effort}${fbNote}），等待回應…`);
+  const started = Date.now();
+  let res;
+  try {
+    res = await fetch("https://api.anthropic.com/v1/messages", {
+      method: "POST",
+      // Without a timeout a hung request keeps `busy` set and blocks every later page.
+      signal: AbortSignal.timeout(API_TIMEOUT_MS),
+      headers: {
+        "content-type": "application/json",
+        "x-api-key": settings.apiKey,
+        "anthropic-version": "2023-06-01",
+        ...(fb && { "anthropic-beta": fb.beta }),
+        // Required for calling the API directly from a browser context.
+        "anthropic-dangerous-direct-browser-access": "true",
       },
-      fallbacks: "default",
-      messages: [
-        {
-          role: "user",
-          content: [
-            { type: "image", source: { type: "base64", media_type: "image/jpeg", data: image.base64 } },
-            { type: "text", text: buildPrompt(settings.targetLang, image.width, image.height) },
-          ],
+      body: JSON.stringify({
+        model: settings.model,
+        max_tokens: 16000,
+        output_config: {
+          effort: settings.effort,
+          format: { type: "json_schema", schema: BLOCKS_SCHEMA },
         },
-      ],
-    }),
-  });
+        ...(fb && { fallbacks: fb.fallbacks }),
+        messages: [
+          {
+            role: "user",
+            content: [
+              { type: "image", source: { type: "base64", media_type: "image/jpeg", data: image.base64 } },
+              { type: "text", text: buildPrompt(settings.targetLang, image.width, image.height) },
+            ],
+          },
+        ],
+      }),
+    });
+  } catch (err) {
+    if (err.name === "TimeoutError") throw new Error(`等候 Claude 回應超過 ${API_TIMEOUT_MS / 1000} 秒，已中止。`);
+    throw new Error(`連不上 Claude API：${err.message}`);
+  }
 
   const body = await res.json().catch(() => ({}));
+  const u = body.usage || {};
+  log(
+    `收到回應：HTTP ${res.status}，${((Date.now() - started) / 1000).toFixed(1)} 秒，` +
+      `stop_reason ${body.stop_reason ?? "-"}，模型 ${body.model ?? "-"}，` +
+      `tokens 輸入 ${u.input_tokens ?? "-"} / 輸出 ${u.output_tokens ?? "-"}`
+  );
   if (!res.ok) {
     const msg = body?.error?.message || res.statusText;
     if (res.status === 401) throw new Error("API key 無效（401）。請到設定頁檢查。");
     if (res.status === 429) throw new Error("請求太頻繁或額度不足（429），請稍後再試。");
     throw new Error(`Claude API 錯誤 ${res.status}：${msg}`);
   }
-  if (body.stop_reason === "refusal") {
-    throw new Error("Claude 拒絕處理這一頁" + (body.stop_details?.explanation ? `：${body.stop_details.explanation}` : "。"));
-  }
+  if (body.stop_reason === "refusal") throw new Error(describeRefusal(body));
   if (body.stop_reason === "max_tokens") throw new Error("輸出被截斷（max_tokens），這一頁可能內容太多。");
   const text = (body.content || [])
     .filter((b) => b.type === "text")
     .map((b) => b.text)
     .join("");
   try {
-    return JSON.parse(text).blocks || [];
+    // body.model differs from the requested model when a fallback answered.
+    return { blocks: JSON.parse(text).blocks || [], model: body.model };
   } catch (_) {
     throw new Error("無法解析 Claude 回傳的區塊資料。");
   }

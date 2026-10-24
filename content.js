@@ -37,7 +37,6 @@ document.addEventListener(
   "keydown",
   (e) => {
     if (["ArrowLeft", "ArrowRight", "PageUp", "PageDown", " "].includes(e.key)) notify("key");
-    if (e.altKey && e.code === "KeyO") toggleOverlay();
   },
   true
 );
@@ -68,7 +67,6 @@ new MutationObserver((mutations) => {
 
 let root = null;
 let turn = 0; // bumped on every page-turn hint; stale overlays are dropped
-let hiddenByUser = false;
 
 function isOverlayNode(node) {
   return root !== null && (node === root || root.contains(node));
@@ -97,18 +95,12 @@ function clearOverlay() {
   root?.replaceChildren();
 }
 
-function toggleOverlay() {
-  if (!root) return;
-  hiddenByUser = !hiddenByUser;
-  root.style.display = hiddenByUser ? "none" : "";
-}
-
 function showOverlay(blocks) {
   const el = ensureRoot();
   el.replaceChildren();
-  el.style.display = hiddenByUser ? "none" : "";
   const vw = window.innerWidth;
   const vh = window.innerHeight;
+  const boxes = [];
   for (const b of blocks) {
     const [x0, y0, x1, y1] = b.box;
     const pad = 3; // cover anti-aliased edges of the original glyphs
@@ -132,7 +124,16 @@ function showOverlay(blocks) {
     });
     box.textContent = b.text;
     el.append(box);
-    fitText(box);
+    boxes.push({ box, kind: b.kind, fit: fitText(box) });
+  }
+  // Use one body-text size for the page so it reads like a book: the median
+  // fit of the paragraphs, but never larger than what a box can hold. Short
+  // blocks (a line cut off at the page edge) would otherwise get huge or tiny.
+  const body = boxes.filter((b) => b.kind !== "heading").map((b) => b.fit).sort((a, b) => a - b);
+  if (!body.length) return;
+  const median = body[body.length >> 1];
+  for (const b of boxes) {
+    if (b.kind !== "heading") b.box.style.fontSize = `${Math.min(b.fit, median)}px`;
   }
 }
 
@@ -147,6 +148,7 @@ function fitText(box) {
     else lo = mid;
   }
   box.style.fontSize = `${lo}px`;
+  return lo;
 }
 
 if (IS_TOP) {

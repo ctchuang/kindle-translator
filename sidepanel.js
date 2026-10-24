@@ -1,21 +1,59 @@
-const port = chrome.runtime.connect({ name: "sidepanel" });
 const list = document.getElementById("list");
 const status = document.getElementById("status");
 const auto = document.getElementById("auto");
 
+const logEl = document.getElementById("log");
+const MAX_LOG_LINES = 300;
+
+let workingSince = null;
+let ticker = null;
+
 function setStatus(text, isErr = false) {
+  stopTicker();
   status.textContent = text;
   status.className = isErr ? "err" : "";
 }
 
-function addPage(text, cached) {
+// While a page is being translated, show how long we've been waiting.
+function startTicker() {
+  stopTicker();
+  workingSince = Date.now();
+  const tick = () => (status.textContent = `辨識並翻譯中… ${Math.round((Date.now() - workingSince) / 1000)} 秒`);
+  tick();
+  status.className = "";
+  ticker = setInterval(tick, 1000);
+}
+
+function stopTicker() {
+  clearInterval(ticker);
+  ticker = null;
+}
+
+let lastLogAt = null;
+
+function addLog(text, at = Date.now(), isErr = false) {
+  const line = document.createElement("div");
+  const gap = lastLogAt ? ` +${((at - lastLogAt) / 1000).toFixed(1)}s` : "";
+  lastLogAt = at;
+  const t = new Date(at);
+  const hms = t.toLocaleTimeString("zh-TW", { hour12: false }) + "." + String(t.getMilliseconds()).padStart(3, "0");
+  line.textContent = `${hms}${gap}  ${text}`;
+  if (isErr) line.className = "err";
+  const atBottom = logEl.scrollHeight - logEl.scrollTop - logEl.clientHeight < 20;
+  logEl.append(line);
+  while (logEl.childElementCount > MAX_LOG_LINES) logEl.firstElementChild.remove();
+  if (atBottom) logEl.scrollTop = logEl.scrollHeight;
+}
+
+function addPage(text, cached, fallbackModel) {
   list.querySelector(".empty")?.remove();
   const el = document.createElement("article");
   el.className = "page";
   const meta = document.createElement("div");
   meta.className = "meta";
   const time = document.createElement("span");
-  time.textContent = new Date().toLocaleTimeString() + (cached ? "（快取）" : "");
+  time.textContent =
+    new Date().toLocaleTimeString() + (cached ? "（快取）" : "") + (fallbackModel ? `（被拒後由 ${fallbackModel} 完成）` : "");
   const copy = document.createElement("a");
   copy.textContent = "複製";
   copy.onclick = () => navigator.clipboard.writeText(text).then(() => (copy.textContent = "已複製"));
@@ -26,24 +64,56 @@ function addPage(text, cached) {
   list.prepend(el); // newest page on top
 }
 
-port.onMessage.addListener((msg) => {
-  if (msg.type === "working") setStatus("辨識並翻譯中…");
+function onMessage(msg) {
+  if (msg.type === "log") addLog(msg.text, msg.at, /^失敗|沒有顯示|中斷|超過/.test(msg.text));
+  if (msg.type === "working") startTicker();
   if (msg.type === "result") {
     setStatus("");
-    addPage(msg.text, msg.cached);
+    addPage(msg.text, msg.cached, msg.fallbackModel);
   }
   if (msg.type === "warn") setStatus(msg.text, true);
   if (msg.type === "error") {
     setStatus(msg.text, true);
     if (msg.needsKey) chrome.runtime.openOptionsPage();
   }
-});
+}
+
+// Chrome may stop the background service worker; that drops the port and any
+// request it was running. Say so in the log and reconnect.
+let port;
+function connect() {
+  port = chrome.runtime.connect({ name: "sidepanel" });
+  port.onMessage.addListener(onMessage);
+  port.onDisconnect.addListener(() => {
+    // Chrome stops an idle service worker every ~30 s; that's normal and not
+    // worth logging. It only matters if a translation was in progress.
+    if (ticker) {
+      addLog("翻譯進行中背景程式被中斷（service worker 被 Chrome 停掉），這次請求遺失", Date.now(), true);
+      setStatus("背景程式中斷，請再按一次「翻譯這一頁」", true);
+    }
+    setTimeout(connect, 500);
+  });
+}
+connect();
 
 document.getElementById("translate").onclick = () => port.postMessage({ type: "translateNow" });
 document.getElementById("options").onclick = () => chrome.runtime.openOptionsPage();
+document.getElementById("clearLog").onclick = (e) => {
+  e.preventDefault(); // don't toggle the <details>
+  logEl.replaceChildren();
+  lastLogAt = null;
+};
 document.getElementById("clear").onclick = () => {
   list.innerHTML = '<p class="empty">已清空。</p>';
 };
 
 chrome.storage.sync.get({ autoTranslate: true }).then(({ autoTranslate }) => (auto.checked = autoTranslate));
 auto.onchange = () => chrome.storage.sync.set({ autoTranslate: auto.checked });
+
+const overlay = document.getElementById("overlay");
+chrome.storage.sync.get({ overlay: true }).then((v) => (overlay.checked = v.overlay));
+overlay.onchange = async () => {
+  // Save first so the background reads the new value when it re-captures.
+  await chrome.storage.sync.set({ overlay: overlay.checked });
+  port.postMessage({ type: "overlayChanged", on: overlay.checked });
+};

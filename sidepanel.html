@@ -9,14 +9,19 @@
       :root { --bg:#1d1f21; --fg:#e8e6e3; --muted:#9a9a9a; --accent:#5cc3cc; --card:#26292c; --border:#3a3d40; --err:#ff8a80; }
     }
     * { box-sizing: border-box; }
-    body { margin:0; background:var(--bg); color:var(--fg); font:15px/1.8 "Noto Serif TC","PingFang TC","Microsoft JhengHei",serif; }
-    header { position:sticky; top:0; background:var(--bg); border-bottom:1px solid var(--border); padding:10px 12px; display:flex; gap:8px; align-items:center; flex-wrap:wrap; font-family:system-ui,sans-serif; font-size:13px; }
+    body { margin:0; height:100vh; display:flex; flex-direction:column; background:var(--bg); color:var(--fg); font:15px/1.8 "Noto Serif TC","PingFang TC","Microsoft JhengHei",serif; }
+    header { background:var(--bg); border-bottom:1px solid var(--border); padding:10px 12px; display:flex; gap:8px; align-items:center; flex-wrap:wrap; font-family:system-ui,sans-serif; font-size:13px; }
     button { background:var(--accent); color:#fff; border:0; border-radius:6px; padding:6px 12px; cursor:pointer; font-size:13px; }
     button.ghost { background:transparent; color:var(--accent); border:1px solid var(--border); }
     label { display:flex; align-items:center; gap:4px; color:var(--muted); }
-    #status { width:100%; color:var(--muted); font-size:12px; min-height:1em; }
+    #status { width:100%; color:var(--muted); font-size:12px; min-height:1em; white-space:pre-wrap; }
     #status.err { color:var(--err); }
-    main { padding:12px; }
+    main { padding:12px; flex:1; overflow:auto; }
+    footer { border-top:1px solid var(--border); background:var(--bg); font:11px/1.5 ui-monospace,Menlo,monospace; color:var(--muted); }
+    footer summary { padding:4px 12px; cursor:pointer; font-family:system-ui,sans-serif; display:flex; justify-content:space-between; }
+    footer summary a { cursor:pointer; color:var(--accent); }
+    #log { max-height:35vh; overflow:auto; margin:0; padding:0 12px 8px; white-space:pre-wrap; word-break:break-all; }
+    #log .err { color:var(--err); }
     .page { background:var(--card); border:1px solid var(--border); border-radius:8px; padding:14px 16px; margin-bottom:12px; white-space:pre-wrap; }
     .page .meta { font:11px system-ui,sans-serif; color:var(--muted); margin-bottom:6px; display:flex; justify-content:space-between; }
     .page .meta a { color:var(--muted); cursor:pointer; }
@@ -27,6 +32,7 @@
   <header>
     <button id="translate">翻譯這一頁</button>
     <label><input type="checkbox" id="auto" /> 翻頁自動翻譯</label>
+    <label title="關掉時只在側邊欄顯示譯文，書頁維持原文"><input type="checkbox" id="overlay" /> 譯文蓋在書頁上</label>
     <button class="ghost" id="clear">清空</button>
     <button class="ghost" id="options">設定</button>
     <div id="status"></div>
@@ -34,6 +40,12 @@
   <main id="list">
     <p class="empty">打開 Kindle Cloud Reader 的書，按「翻譯這一頁」或直接翻頁。快捷鍵 Alt+T。</p>
   </main>
+  <footer>
+    <details open>
+      <summary><span>執行紀錄</span><a id="clearLog">清除</a></summary>
+      <div id="log"></div>
+    </details>
+  </footer>
   <script src="sidepanel.js"></script>
 </body>
 </html>
