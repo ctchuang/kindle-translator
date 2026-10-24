@@ -16,6 +16,10 @@
     label { display:flex; align-items:center; gap:4px; color:var(--muted); }
     #status { width:100%; color:var(--muted); font-size:12px; min-height:1em; white-space:pre-wrap; }
     #status.err { color:var(--err); }
+    /* While translating: a tinted pill with a pulsing dot, so it's visible at a glance. */
+    #status.busy { color:var(--accent); background:color-mix(in srgb, var(--accent) 14%, transparent); font-weight:600; font-size:13px; padding:4px 10px; border-radius:6px; }
+    #status.busy::before { content:""; display:inline-block; width:8px; height:8px; margin-right:8px; border-radius:50%; background:currentColor; vertical-align:1px; animation:pulse 1s ease-in-out infinite; }
+    @keyframes pulse { 50% { opacity:.25; transform:scale(.7); } }
     main { padding:12px; flex:1; overflow:auto; }
     footer { border-top:1px solid var(--border); background:var(--bg); font:11px/1.5 ui-monospace,Menlo,monospace; color:var(--muted); }
     footer summary { padding:4px 12px; cursor:pointer; font-family:system-ui,sans-serif; display:flex; justify-content:space-between; }

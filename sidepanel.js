@@ -20,7 +20,7 @@ function startTicker() {
   workingSince = Date.now();
   const tick = () => (status.textContent = `辨識並翻譯中… ${Math.round((Date.now() - workingSince) / 1000)} 秒`);
   tick();
-  status.className = "";
+  status.className = "busy";
   ticker = setInterval(tick, 1000);
 }
 
