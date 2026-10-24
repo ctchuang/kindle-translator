@@ -2,9 +2,21 @@
 // text block and translate it, then pushes the blocks to the page (overlay)
 // and the side panel.
 
+// Only Opus: in testing, Sonnet 5.5 and Haiku 5.5 declined to translate
+// screenshots of Kindle book pages (citing copyright) and returned no blocks.
+const MODEL = "claude-opus-5-5";
+
+// Server-side fallback when a safety classifier declines the request.
+// Opus 5.5 runs a biology classifier that Opus 5 doesn't, so "default"
+// routing can leave benign pages (e.g. a history of biological warfare)
+// declined; naming Opus 5 / Opus 4.8 explicitly retries them there.
+const FALLBACK = {
+  beta: "server-side-fallback-2026-06-01",
+  fallbacks: [{ model: "claude-opus-5" }, { model: "claude-opus-4-8" }],
+};
+
 const DEFAULTS = {
   apiKey: "",
-  model: "claude-opus-5-5",
   effort: "low",
   autoTranslate: true,
   targetLang: "繁體中文（台灣用語）",
@@ -14,11 +26,9 @@ const DEFAULTS = {
 // Image size we send. Within the model's limits, returned coordinates map 1:1
 // to our pixels; above either limit the API downscales again and every box
 // shrinks toward the top-left (seen: 2576×1593 = 4.1 MP came back at ~0.956×).
-// Pixel caps sit a little under the documented 3.75 MP / ~1.15 MP.
-const IMAGE_LIMITS = {
-  default: { maxEdge: 2576, maxPixels: 3_700_000 },
-  haiku: { maxEdge: 1568, maxPixels: 1_100_000 },
-};
+// The pixel cap sits a little under the documented 3.75 MP.
+const MAX_EDGE = 2576;
+const MAX_PIXELS = 3_700_000;
 
 const API_TIMEOUT_MS = 180_000;
 
@@ -28,6 +38,7 @@ let panelPorts = new Set();
 let busy = false;
 let pending = null; // { force } of a request waiting for the current one
 let inflight = null; // AbortController of the current API call
+let inflightPage = null; // { hash, windowId } of the screen being translated
 
 // Chrome stops this service worker after ~30 s idle, wiping module state, so
 // the page cache and last screenshot hash live in session storage (cleared
@@ -70,10 +81,7 @@ chrome.runtime.onMessage.addListener(async (msg, sender) => {
   // Only translate when the panel is open, so we don't spend tokens silently.
   if (!autoTranslate || panelPorts.size === 0 || !sender.tab?.active) return;
   log(`偵測到翻頁（${msg.reason}）`);
-  // Key / click / wheel / resize already made the page drop the in-flight
-  // overlay (its turn counter moved), so that request is wasted: cancel it.
-  // Plain DOM churn doesn't, so let that request finish.
-  translateActivePage({ force: false, supersede: msg.reason !== "dom" });
+  translateActivePage({ force: false });
 });
 
 chrome.commands.onCommand.addListener((cmd) => {
@@ -108,23 +116,61 @@ async function getSettings() {
   return { ...DEFAULTS, ...(await chrome.storage.sync.get(Object.keys(DEFAULTS))) };
 }
 
-async function sha256(str) {
-  const buf = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(str));
+// Part of the viewport that holds the book text, as fractions. Leaves out the
+// title bar, the progress bar / "Learning reading speed…" footer, the page
+// arrows (which get a focus ring after a key press) and the bookmark ribbon.
+const CONTENT_CROP = { x0: 0.09, y0: 0.08, x1: 0.91, y1: 0.91 };
+
+// Identifies the page by its text area only, so reader-UI changes don't make
+// the same page look new (cache miss, paid retranslation) and a real page
+// change is noticed however it happened (arrow, Enter, slider, table of contents).
+async function contentHash(dataUrl) {
+  const bitmap = await createImageBitmap(await (await fetch(dataUrl)).blob());
+  const sx = bitmap.width * CONTENT_CROP.x0;
+  const sy = bitmap.height * CONTENT_CROP.y0;
+  const sw = bitmap.width * (CONTENT_CROP.x1 - CONTENT_CROP.x0);
+  const sh = bitmap.height * (CONTENT_CROP.y1 - CONTENT_CROP.y0);
+  const w = 480;
+  const h = Math.round((w * sh) / sw);
+  const ctx = new OffscreenCanvas(w, h).getContext("2d");
+  ctx.drawImage(bitmap, sx, sy, sw, sh, 0, 0, w, h);
+  const buf = await crypto.subtle.digest("SHA-256", ctx.getImageData(0, 0, w, h).data);
   return [...new Uint8Array(buf)].map((b) => b.toString(16).padStart(2, "0")).join("");
 }
 
-async function translateActivePage({ force, supersede = force }) {
+async function captureHash(windowId) {
+  return contentHash(await chrome.tabs.captureVisibleTab(windowId, { format: "jpeg", quality: 85 }));
+}
+
+// While a request runs, any page-turn signal (even plain DOM churn, or an
+// Enter on the arrow button that no key handler recognises) re-captures the
+// screen: if the text area changed, the running request is for a page that's
+// gone, so cancel it.
+async function cancelIfPageChanged() {
+  const page = inflightPage;
+  if (!page) return;
+  try {
+    if ((await captureHash(page.windowId)) === page.hash || inflightPage !== page) return;
+  } catch (_) {
+    return; // tab not capturable right now (e.g. another tab is in front)
+  }
+  log("畫面已換頁：取消進行中的請求，改翻目前畫面");
+  inflight?.abort();
+}
+
+async function translateActivePage({ force }) {
   if (busy) {
     // Run once more after the current request finishes, keeping "force" if
     // any queued trigger asked for it.
     pending = { force: force || !!pending?.force };
-    if (supersede && inflight) {
-      // A manual retranslate or a page turn wins: cancel the running API call
-      // instead of waiting for it. Tokens it already used are still billed.
-      log(`${force ? "手動翻譯" : "已翻頁"}：取消進行中的請求，改翻目前畫面`);
+    if (force && inflight) {
+      // A manual retranslate wins: cancel the running API call instead of
+      // waiting for it. Tokens it already used are still billed.
+      log("手動翻譯：取消進行中的請求，改翻目前畫面");
       inflight.abort();
     } else {
-      log("前一個請求還沒結束，排隊等它完成後再檢查一次");
+      log("前一個請求還沒結束，排隊；同時檢查畫面是否已換頁");
+      cancelIfPageChanged();
     }
     return;
   }
@@ -161,7 +207,7 @@ async function translateActivePage({ force, supersede = force }) {
 
     const dataUrl = await chrome.tabs.captureVisibleTab(tab.windowId, { format: "jpeg", quality: 85 });
     log(`截圖完成（${Math.round((dataUrl.length * 3) / 4 / 1024)} KB）`);
-    const hash = await sha256(dataUrl);
+    const hash = await contentHash(dataUrl);
     const sameAsLast = (await swapLastHash(hash)) === hash;
 
     const cached = await cacheGet(hash);
@@ -179,13 +225,19 @@ async function translateActivePage({ force, supersede = force }) {
     }
 
     broadcast({ type: "working", thumb: dataUrl });
-    const image = await prepareImage(dataUrl, settings.model);
+    const image = await prepareImage(dataUrl);
     log(`縮圖為 ${image.width}×${image.height}（${Math.round((image.base64.length * 3) / 4 / 1024)} KB）`);
-    const reply = await callClaude(settings, image);
+    inflightPage = { hash, windowId: tab.windowId };
+    let reply;
+    try {
+      reply = await callClaude(settings, image);
+    } finally {
+      inflightPage = null;
+    }
     const blocks = finishBlocks(reply.blocks, image);
     log(`Claude 回傳 ${reply.blocks.length} 個區塊，可用 ${blocks.length} 個`);
     if (reply.notes) log(`Claude 的說明：${reply.notes}`);
-    const fallbackModel = reply.model && reply.model !== settings.model ? reply.model : null;
+    const fallbackModel = reply.model && reply.model !== MODEL ? reply.model : null;
     if (!blocks.length) {
       // Not cached: it may be a bad capture or a model quietly declining, and a
       // cached empty page would never be retried. Show what Claude was sent.
@@ -196,7 +248,19 @@ async function translateActivePage({ force, supersede = force }) {
     }
     await cacheSet(hash, blocks);
     broadcast({ type: "result", text: blocksToText(blocks), thumb: dataUrl, fallbackModel });
-    if (settings.overlay) await showOnPage(tab.id, blocks, turn);
+    if (settings.overlay) {
+      // The page may have changed in the last moments without a signal we
+      // caught; never draw one page's translation over another.
+      let now = hash;
+      try {
+        now = await captureHash(tab.windowId);
+      } catch (_) {}
+      if (now === hash) await showOnPage(tab.id, blocks, turn);
+      else {
+        log("翻譯期間畫面已換頁，這份譯文不畫上去（已存快取）");
+        pending ??= { force: false };
+      }
+    }
   } catch (err) {
     if (err.name === "AbortError") {
       // Forget this screen so the queued run doesn't skip it as "unchanged".
@@ -259,13 +323,12 @@ async function showOnPage(tabId, blocks, turn) {
 
 // Downscale the screenshot to the size we send, and keep its pixels so we can
 // sample background / text colors for each block afterwards.
-async function prepareImage(dataUrl, model) {
+async function prepareImage(dataUrl) {
   const bitmap = await createImageBitmap(await (await fetch(dataUrl)).blob());
-  const { maxEdge, maxPixels } = model.includes("haiku") ? IMAGE_LIMITS.haiku : IMAGE_LIMITS.default;
   const scale = Math.min(
     1,
-    maxEdge / Math.max(bitmap.width, bitmap.height),
-    Math.sqrt(maxPixels / (bitmap.width * bitmap.height))
+    MAX_EDGE / Math.max(bitmap.width, bitmap.height),
+    Math.sqrt(MAX_PIXELS / (bitmap.width * bitmap.height))
   );
   const width = Math.round(bitmap.width * scale);
   const height = Math.round(bitmap.height * scale);
@@ -413,23 +476,9 @@ function buildPrompt(targetLang, width, height) {
 5. notes：如果有任何看得到的內文沒有放進 blocks（包括你決定不翻譯的段落），用一句話說明是哪些、為什麼；全部都有放就留空字串。`;
 }
 
-// Server-side fallback when a safety classifier declines the request.
-// Opus 5.5 runs a biology classifier that Opus 5 doesn't, so "default"
-// routing can leave benign pages (e.g. a history of biological warfare)
-// declined; naming Opus 5 / Opus 4.8 explicitly retries them there.
-// Sonnet 5.5 only accepts "default"; Haiku 5.5 has no server-side fallback.
-function fallbackConfig(model) {
-  if (model === "claude-opus-5-5") {
-    return { beta: "server-side-fallback-2026-06-01", fallbacks: [{ model: "claude-opus-5" }, { model: "claude-opus-4-8" }] };
-  }
-  if (model === "claude-sonnet-5-5") return { beta: "server-side-fallback-2026-07-01", fallbacks: "default" };
-  return null;
-}
-
 async function callClaude(settings, image) {
-  const fb = fallbackConfig(settings.model);
-  const fbNote = fb ? `，備援：${Array.isArray(fb.fallbacks) ? fb.fallbacks.map((f) => f.model).join(" → ") : fb.fallbacks}` : "";
-  log(`送出 API 請求（${settings.model}，effort ${settings.effort}${fbNote}），等待回應…`);
+  const fbNote = FALLBACK.fallbacks.map((f) => f.model).join(" → ");
+  log(`送出 API 請求（${MODEL}，effort ${settings.effort}，備援：${fbNote}），等待回應…`);
   const started = Date.now();
   inflight = new AbortController();
   let res;
@@ -448,19 +497,19 @@ async function callClaude(settings, image) {
         "content-type": "application/json",
         "x-api-key": settings.apiKey,
         "anthropic-version": "2023-06-01",
-        ...(fb && { "anthropic-beta": fb.beta }),
+        "anthropic-beta": FALLBACK.beta,
         // Required for calling the API directly from a browser context.
         "anthropic-dangerous-direct-browser-access": "true",
       },
       body: JSON.stringify({
-        model: settings.model,
+        model: MODEL,
         max_tokens: 16000,
         stream: true,
         output_config: {
           effort: settings.effort,
           format: { type: "json_schema", schema: BLOCKS_SCHEMA },
         },
-        ...(fb && { fallbacks: fb.fallbacks }),
+        fallbacks: FALLBACK.fallbacks,
         messages: [
           {
             role: "user",

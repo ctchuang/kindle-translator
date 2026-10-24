@@ -43,7 +43,7 @@ function notify(reason, userAction = true) {
 document.addEventListener(
   "keydown",
   (e) => {
-    if (["ArrowLeft", "ArrowRight", "PageUp", "PageDown", " "].includes(e.key)) notify("key");
+    if (["ArrowLeft", "ArrowRight", "PageUp", "PageDown", " ", "Enter"].includes(e.key)) notify("key");
   },
   true
 );

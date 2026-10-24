@@ -20,12 +20,9 @@
   <input id="apiKey" type="password" placeholder="sk-ant-..." autocomplete="off" />
   <div class="hint">到 console.anthropic.com 建立。key 只存在這台瀏覽器的 Chrome 同步儲存區，只會送往 api.anthropic.com。</div>
 
-  <label for="model">模型</label>
-  <select id="model">
-    <option value="claude-opus-5-5">Claude Opus 5.5（品質最好）</option>
-    <option value="claude-sonnet-5-5">Claude Sonnet 5.5（較便宜、較快）</option>
-    <option value="claude-haiku-5-5">Claude Haiku 5.5（最便宜）</option>
-  </select>
+  <label>模型</label>
+  <div>Claude Opus 5.5</div>
+  <div class="hint">固定使用 Opus。實測 Sonnet 5.5、Haiku 5.5 會以版權為由拒絕翻譯 Kindle 書頁截圖。</div>
 
   <label for="effort">思考程度（effort）</label>
   <select id="effort">
