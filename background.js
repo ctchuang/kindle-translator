@@ -32,6 +32,11 @@ const MAX_PIXELS = 3_700_000;
 
 const API_TIMEOUT_MS = 180_000;
 
+// Opus sometimes answers a page with a summary instead of a translation,
+// citing copyright, and the same page often translates fine on the next
+// try. Retry that many times; after that show the summary, uncached.
+const SUMMARY_RETRIES = 1;
+
 const READER_RE = /^https:\/\/read\.amazon\.(com|co\.jp|co\.uk|de|ca|com\.au)\//;
 
 let panelPorts = new Set();
@@ -50,6 +55,19 @@ async function cacheGet(hash) {
 
 async function cacheSet(hash, blocks) {
   await chrome.storage.session.set({ [`page:${hash}`]: blocks });
+}
+
+// Content hash of the page whose translation is currently shown. While the
+// screen still matches it, the side-panel button retranslates (skipping the
+// cache) and is labelled that way.
+async function getShownHash() {
+  return (await chrome.storage.session.get("shownHash")).shownHash;
+}
+
+async function setShownHash(hash) {
+  if (hash) await chrome.storage.session.set({ shownHash: hash });
+  else await chrome.storage.session.remove("shownHash");
+  broadcast({ type: "pageState", retranslate: !!hash });
 }
 
 async function swapLastHash(hash) {
@@ -78,11 +96,22 @@ chrome.runtime.onConnect.addListener((port) => {
 chrome.runtime.onMessage.addListener(async (msg, sender) => {
   if (msg.type !== "pageTurned") return;
   const { autoTranslate } = await getSettings();
+  if (panelPorts.size === 0 || !sender.tab?.active) return;
   // Only translate when the panel is open, so we don't spend tokens silently.
-  if (!autoTranslate || panelPorts.size === 0 || !sender.tab?.active) return;
+  if (!autoTranslate) return refreshButtonState(sender.tab.windowId);
   log(`偵測到翻頁（${msg.reason}）`);
   translateActivePage({ force: false });
 });
+
+// Without auto-translate nothing else re-checks the screen after a page turn,
+// so do it here to keep the button label honest.
+async function refreshButtonState(windowId) {
+  if (busy) return;
+  try {
+    const shown = await getShownHash();
+    if (shown && (await captureHash(windowId)) !== shown) await setShownHash(null);
+  } catch (_) {}
+}
 
 chrome.commands.onCommand.addListener((cmd) => {
   if (cmd !== "translate-page") return;
@@ -253,13 +282,18 @@ async function translateActivePage({ force }) {
     const hash = await contentHash(dataUrl);
     const sameAsLast = (await swapLastHash(hash)) === hash;
 
-    const cached = await cacheGet(hash);
+    // The button reads "重新翻譯本頁" while the shown translation is for this
+    // very screen; pressing it then means "ask Claude again", not "use cache".
+    const retranslate = force && hash === (await getShownHash());
+    if (retranslate) log("畫面沒變：重新翻譯本頁，不使用快取");
+    const cached = retranslate ? null : await cacheGet(hash);
     if (cached) {
       const blocks = cached;
       log(`命中快取（${blocks.length} 個區塊），不呼叫 API`);
       // Same screen re-captured (e.g. after a stray DOM change): just restore the overlay.
       if (force || !sameAsLast) broadcast({ type: "result", text: blocksToText(blocks), cached: true, thumb: dataUrl });
       if (settings.overlay) await showOnPage(tab.id, blocks, turn);
+      await setShownHash(hash);
       return;
     }
     if (!force && sameAsLast) {
@@ -268,15 +302,25 @@ async function translateActivePage({ force }) {
     }
 
     broadcast({ type: "working", thumb: dataUrl });
+    await setShownHash(null);
     const image = await prepareImage(dataUrl);
     log(`縮圖為 ${image.width}×${image.height}（${Math.round((image.base64.length * 3) / 4 / 1024)} KB）`);
     inflightPage = { hash, windowId: tab.windowId };
     let reply;
     try {
-      reply = await callClaude(settings, image);
+      for (let attempt = 0; ; attempt++) {
+        reply = await callClaude(settings, image);
+        if (!isSummary(reply)) break;
+        if (attempt >= SUMMARY_RETRIES) {
+          log(`重試後仍然只給摘要，先顯示摘要（不存快取）：${reply.notes || "沒有說明"}`);
+          break;
+        }
+        log(`Claude 這次只給摘要，不是翻譯（${reply.notes || "沒有說明"}），自動重新請求`);
+      }
     } finally {
       inflightPage = null;
     }
+    const summary = isSummary(reply);
     const blocks = finishBlocks(reply.blocks, image);
     log(`Claude 回傳 ${reply.blocks.length} 個區塊，可用 ${blocks.length} 個`);
     if (reply.notes) log(`Claude 的說明：${reply.notes}`);
@@ -289,8 +333,12 @@ async function translateActivePage({ force }) {
       broadcast({ type: "warn", text: `Claude 沒有回傳任何譯文區塊（${reply.model}）：${why}` });
       return;
     }
-    await cacheSet(hash, blocks);
-    broadcast({ type: "result", text: blocksToText(blocks), thumb: dataUrl, fallbackModel });
+    // A summary isn't cached, so revisiting the page asks for a translation again.
+    if (!summary) await cacheSet(hash, blocks);
+    broadcast({ type: "result", text: blocksToText(blocks), thumb: dataUrl, fallbackModel, summary });
+    // After the result, which clears the status line.
+    if (summary) broadcast({ type: "warn", text: "Claude 只給了摘要，不是完整翻譯。可以按「重新翻譯本頁」再試。" });
+    if (!settings.overlay) await setShownHash(hash); // shown in the side panel only
     if (settings.overlay) {
       // The page may have changed in the last moments without a signal we
       // caught; never draw one page's translation over another.
@@ -298,8 +346,10 @@ async function translateActivePage({ force }) {
       try {
         now = await captureHash(tab.windowId);
       } catch (_) {}
-      if (now === hash) await showOnPage(tab.id, blocks, turn);
-      else {
+      if (now === hash) {
+        await showOnPage(tab.id, blocks, turn);
+        await setShownHash(hash);
+      } else {
         log("翻譯期間畫面已換頁，這份譯文不畫上去（已存快取）");
         pending ??= { force: false };
       }
@@ -507,8 +557,9 @@ const BLOCKS_SCHEMA = {
       },
     },
     notes: { type: "string" },
+    summarized: { type: "boolean" },
   },
-  required: ["blocks", "notes"],
+  required: ["blocks", "notes", "summarized"],
   additionalProperties: false,
 };
 
@@ -518,7 +569,8 @@ function buildPrompt(targetLang, width, height) {
 2. 每個區塊給出緊貼原文字的外框 x0, y0（左上）與 x1, y1（右下），單位是這張截圖的像素。雙頁或多欄時每欄分開框，不要一個框橫跨兩欄。lines 是這個區塊的原文在截圖中佔幾行。
 3. text 是該區塊翻成${targetLang}的譯文，只放譯文、不附原文。區塊在頁首或頁尾被切斷時，只翻看得到的部分。
 4. 依閱讀順序排列。如果截圖中沒有書本內文（例如載入中或空白頁），回傳空的 blocks。
-5. notes：如果有任何看得到的內文沒有放進 blocks（包括你決定不翻譯的段落），用一句話說明是哪些、為什麼；全部都有放就留空字串。`;
+5. notes：如果有任何看得到的內文沒有放進 blocks（包括你決定不翻譯的段落），用一句話說明是哪些、為什麼；全部都有放就留空字串。
+6. summarized：如果任何區塊放的是摘要或改寫，而不是逐句翻譯，設為 true；否則 false。`;
 }
 
 async function callClaude(settings, image) {
@@ -618,7 +670,17 @@ function parseReply(content = []) {
     if (cut < 0) throw err;
     out = JSON.parse(join(content.slice(cut + 1)));
   }
-  return { blocks: out.blocks || [], notes: (out.notes || "").trim() };
+  return { blocks: out.blocks || [], notes: (out.notes || "").trim(), summarized: out.summarized === true };
+}
+
+// Claude flags summaries itself; the text checks catch the times it says so
+// only in the notes or by labelling blocks "（摘要）".
+function isSummary(reply) {
+  return (
+    reply.summarized ||
+    /摘要/.test(reply.notes) ||
+    reply.blocks.some((b) => /^[（(]\s*摘要/.test((b.text || "").trim()))
+  );
 }
 
 // Reassemble a Messages API event stream into the shape of a non-streamed

@@ -52,7 +52,7 @@ function addLog(text, at = Date.now(), isErr = false, image = null) {
   if (atBottom) logEl.scrollTop = logEl.scrollHeight;
 }
 
-function addPage(text, cached, fallbackModel) {
+function addPage(text, cached, fallbackModel, summary) {
   list.querySelector(".empty")?.remove();
   const el = document.createElement("article");
   el.className = "page";
@@ -60,7 +60,10 @@ function addPage(text, cached, fallbackModel) {
   meta.className = "meta";
   const time = document.createElement("span");
   time.textContent =
-    new Date().toLocaleTimeString() + (cached ? "（快取）" : "") + (fallbackModel ? `（被拒後由 ${fallbackModel} 完成）` : "");
+    new Date().toLocaleTimeString() +
+    (cached ? "（快取）" : "") +
+    (summary ? "（摘要，非完整翻譯）" : "") +
+    (fallbackModel ? `（被拒後由 ${fallbackModel} 完成）` : "");
   const copy = document.createElement("a");
   copy.textContent = "複製";
   copy.onclick = () => navigator.clipboard.writeText(text).then(() => (copy.textContent = "已複製"));
@@ -74,10 +77,13 @@ function addPage(text, cached, fallbackModel) {
 function onMessage(msg) {
   if (msg.type === "log") addLog(msg.text, msg.at, /^失敗|沒有顯示|沒有可用|中斷|超過/.test(msg.text), msg.image);
   if (msg.type === "working") startTicker();
+  // The button retranslates (skipping the cache) only while the translation on
+  // screen is for the page still showing; otherwise it's the plain action.
+  if (msg.type === "pageState") translateBtn.textContent = msg.retranslate ? "重新翻譯本頁" : "翻譯這一頁";
   if (msg.type === "idle" && ticker) setStatus("");
   if (msg.type === "result") {
     setStatus("");
-    addPage(msg.text, msg.cached, msg.fallbackModel);
+    addPage(msg.text, msg.cached, msg.fallbackModel, msg.summary);
   }
   if (msg.type === "warn") setStatus(msg.text, true);
   if (msg.type === "error") {
@@ -104,7 +110,8 @@ function connect() {
 }
 connect();
 
-document.getElementById("translate").onclick = () => port.postMessage({ type: "translateNow" });
+const translateBtn = document.getElementById("translate");
+translateBtn.onclick = () => port.postMessage({ type: "translateNow" });
 document.getElementById("options").onclick = () => chrome.runtime.openOptionsPage();
 document.getElementById("clearLog").onclick = (e) => {
   e.preventDefault(); // don't toggle the <details>
