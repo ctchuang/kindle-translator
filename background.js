@@ -42,10 +42,11 @@ const MAX_PIXELS = 3_700_000;
 const API_TIMEOUT_MS = 180_000;
 
 // Part of the viewport OCR reads. Wider than CONTENT_CROP, which cuts off the
-// first line of a page, but still clear of the title bar, the footer and the
-// page arrows. Larger crops are scaled down: Tesseract's time grows with
+// first and last lines of a page in some window shapes, but still clear of the
+// title bar, the footer ("N mins left") and the page arrows. The "Back to"
+// button and progress slider can fall inside; OCR noise filtering drops them. Larger crops are scaled down: Tesseract's time grows with
 // pixels, and body text stays well above the size it needs.
-const OCR_CROP = { x0: 0.07, y0: 0.06, x1: 0.93, y1: 0.895 };
+const OCR_CROP = { x0: 0.09, y0: 0.06, x1: 0.93, y1: 0.94 };
 const OCR_MAX_PIXELS = 5_000_000;
 
 // Claude sometimes answers a page with a summary instead of a translation,
@@ -116,7 +117,7 @@ chrome.runtime.onMessage.addListener(async (msg, sender) => {
   // Only translate when the panel is open, so we don't spend tokens silently.
   if (!autoTranslate) return refreshButtonState(sender.tab.windowId);
   log(`偵測到翻頁（${msg.reason}）`);
-  translateActivePage({ force: false });
+  translateActivePage({ force: false, reason: msg.reason });
 });
 
 // Without auto-translate nothing else re-checks the screen after a page turn,
@@ -125,7 +126,10 @@ async function refreshButtonState(windowId) {
   if (busy) return;
   try {
     const shown = await getShownHash();
-    if (shown && (await captureHash(windowId)) !== shown) await setShownHash(null);
+    if (!shown) return;
+    const now = await captureHash(windowId);
+    const { overlayHash } = await chrome.storage.session.get("overlayHash");
+    if (now !== shown && now !== overlayHash) await setShownHash(null);
   } catch (_) {}
 }
 
@@ -246,11 +250,17 @@ async function checkPageOnce() {
   inflight?.abort();
 }
 
-async function translateActivePage({ force }) {
+// `reason` is the page-turn signal: "dom" is the reader re-rendering on its
+// own (reading-progress updates every 15 s or so), not a user action.
+async function translateActivePage({ force, reason }) {
   if (busy) {
     // Run once more after the current request finishes, keeping "force" if
-    // any queued trigger asked for it.
-    pending = { force: force || !!pending?.force };
+    // any queued trigger asked for it, and "dom" only if every trigger was
+    // reader churn (so the queued run can skip without hiding the overlay).
+    pending = {
+      force: force || !!pending?.force,
+      reason: !pending || pending.reason === "dom" ? reason : pending.reason,
+    };
     if (force && inflight) {
       // A manual retranslate wins: cancel the running API call instead of
       // waiting for it. Tokens it already used are still billed.
@@ -278,6 +288,19 @@ async function translateActivePage({ force }) {
       return;
     }
 
+    // The reader re-renders now and then without the page changing. Hiding
+    // the overlay to check made the original text flash, so compare the
+    // screen as it is, overlay included, with how it looked when drawn.
+    if (!force && reason === "dom" && settings.overlay) {
+      const { overlayHash } = await chrome.storage.session.get("overlayHash");
+      try {
+        if (overlayHash && (await captureHash(tab.windowId)) === overlayHash) {
+          log("畫面沒變（譯文還在），略過");
+          return;
+        }
+      } catch (_) {}
+    }
+
     // Hide our own overlay first so it doesn't end up in the screenshot.
     // The page answers with its page-turn counter; an overlay tagged with an
     // older counter (user turned the page mid-request) gets dropped there.
@@ -285,6 +308,7 @@ async function translateActivePage({ force }) {
     if (settings.overlay) {
       try {
         turn = (await sendToPage(tab.id, { type: "clearOverlay" }))?.turn;
+        await chrome.storage.session.remove("overlayHash");
         log("已清掉頁面上的覆蓋層");
       } catch (err) {
         // Reported again by showOnPage; still translate for the side panel.
@@ -431,7 +455,17 @@ async function showOnPage(tabId, blocks, turn) {
     log(`覆蓋層沒有顯示：${res?.reason || "頁面沒有回應"}`);
   } else {
     log(`覆蓋層已畫上 ${blocks.length} 個區塊`);
+    await rememberOverlayHash(tabId);
   }
+}
+
+// Hash of the screen with the overlay on it, for the "dom" re-check above.
+async function rememberOverlayHash(tabId) {
+  await new Promise((r) => setTimeout(r, 150)); // let the overlay paint
+  try {
+    const { windowId } = await chrome.tabs.get(tabId);
+    await chrome.storage.session.set({ overlayHash: await captureHash(windowId) });
+  } catch (_) {}
 }
 
 // Downscale the screenshot to the size we send, and keep its pixels so we can
