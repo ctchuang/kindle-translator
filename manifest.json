@@ -1,0 +1,67 @@
+{
+  "manifest_version": 3,
+  "name": "Kindle 自動翻譯",
+  "version": "0.1.1",
+  "description": "截取 Kindle Cloud Reader 目前頁面，用 Claude 辨識並翻譯成繁體中文，顯示在側邊欄。",
+  "permissions": [
+    "sidePanel",
+    "storage",
+    "tabs",
+    "activeTab"
+  ],
+  "host_permissions": [
+    "<all_urls>",
+    "https://read.amazon.com/*",
+    "https://read.amazon.co.jp/*",
+    "https://read.amazon.co.uk/*",
+    "https://read.amazon.de/*",
+    "https://read.amazon.ca/*",
+    "https://read.amazon.com.au/*",
+    "https://api.anthropic.com/*"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "https://read.amazon.com/*",
+        "https://read.amazon.co.jp/*",
+        "https://read.amazon.co.uk/*",
+        "https://read.amazon.de/*",
+        "https://read.amazon.ca/*",
+        "https://read.amazon.com.au/*"
+      ],
+      "js": [
+        "content.js"
+      ],
+      "run_at": "document_idle",
+      "all_frames": true
+    }
+  ],
+  "side_panel": {
+    "default_path": "sidepanel.html"
+  },
+  "options_page": "options.html",
+  "action": {
+    "default_title": "開啟 Kindle 翻譯側邊欄",
+    "default_icon": {
+      "16": "icons/icon16.png",
+      "48": "icons/icon48.png",
+      "128": "icons/icon128.png"
+    }
+  },
+  "icons": {
+    "16": "icons/icon16.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
+  },
+  "commands": {
+    "translate-page": {
+      "suggested_key": {
+        "default": "Alt+T"
+      },
+      "description": "翻譯目前頁面"
+    }
+  }
+}

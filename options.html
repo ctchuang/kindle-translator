@@ -1,0 +1,45 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="utf-8" />
+  <title>Kindle 翻譯設定</title>
+  <style>
+    body { font:14px/1.6 system-ui,"PingFang TC","Microsoft JhengHei",sans-serif; max-width:560px; margin:32px auto; padding:0 16px; color:#222; background:#fff; }
+    @media (prefers-color-scheme: dark) { body { color:#e8e6e3; background:#1d1f21; } input,select { background:#26292c; color:inherit; } }
+    label { display:block; margin:16px 0 4px; font-weight:600; }
+    input, select { width:100%; padding:8px; border:1px solid #aaa; border-radius:6px; font-size:14px; }
+    .hint { color:#888; font-size:12px; margin-top:4px; }
+    button { margin-top:20px; background:#146e78; color:#fff; border:0; border-radius:6px; padding:8px 18px; font-size:14px; cursor:pointer; }
+    #saved { margin-left:10px; color:#146e78; }
+  </style>
+</head>
+<body>
+  <h1>Kindle 翻譯設定</h1>
+
+  <label for="apiKey">Anthropic API key</label>
+  <input id="apiKey" type="password" placeholder="sk-ant-..." autocomplete="off" />
+  <div class="hint">到 console.anthropic.com 建立。key 只存在這台瀏覽器的 Chrome 同步儲存區，只會送往 api.anthropic.com。</div>
+
+  <label for="model">模型</label>
+  <select id="model">
+    <option value="claude-opus-5-5">Claude Opus 5.5（品質最好）</option>
+    <option value="claude-sonnet-5-5">Claude Sonnet 5.5（較便宜、較快）</option>
+    <option value="claude-haiku-5-5">Claude Haiku 5.5（最便宜）</option>
+  </select>
+
+  <label for="effort">思考程度（effort）</label>
+  <select id="effort">
+    <option value="low">low（最快，翻譯通常夠用）</option>
+    <option value="medium">medium</option>
+    <option value="high">high</option>
+  </select>
+
+  <label for="targetLang">目標語言</label>
+  <input id="targetLang" />
+  <div class="hint">例如「繁體中文（台灣用語）」、「繁體中文（香港用語）」。</div>
+
+  <button id="save">儲存</button><span id="saved"></span>
+
+  <script src="options.js"></script>
+</body>
+</html>
