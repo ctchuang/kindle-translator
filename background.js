@@ -101,12 +101,13 @@ chrome.runtime.onConnect.addListener((port) => {
   if (port.name !== "sidepanel") return;
   panelPorts.add(port);
   port.onDisconnect.addListener(() => panelPorts.delete(port));
+  // Button label and "not translated yet" hint for a freshly opened panel.
+  getShownHash().then((hash) => port.postMessage({ type: "pageState", retranslate: !!hash })).catch(() => {});
   port.onMessage.addListener((msg) => {
     if (msg.type === "translateNow") {
       log("手動翻譯：按下「翻譯這一頁」");
       translateActivePage({ force: true });
     }
-    if (msg.type === "overlayChanged") onOverlayChanged(msg.on);
   });
 });
 
@@ -139,13 +140,12 @@ chrome.commands.onCommand.addListener((cmd) => {
   translateActivePage({ force: true });
 });
 
-// Side-panel switch. Off: remove the overlay now. On: re-capture; a cached
-// page shows its overlay right away without a new API call.
-async function onOverlayChanged(on) {
-  if (on) return translateActivePage({ force: false });
-  const [tab] = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
-  if (tab && READER_RE.test(tab.url || "")) await sendToPage(tab.id, { type: "clearOverlay" }).catch(() => {});
-}
+// Translation / original switch (side panel or the button on the page). The
+// page hides and shows its overlay itself. When it comes back on, check that
+// it still matches the screen; a cached page is redrawn without an API call.
+chrome.storage.onChanged.addListener((changes, area) => {
+  if (area === "sync" && changes.overlay?.newValue) translateActivePage({ force: false, reason: "overlay" });
+});
 
 // Step-by-step trace shown at the bottom of the side panel. `image` (a data
 // URL) is shown as a thumbnail under the line.
@@ -261,6 +261,7 @@ async function translateActivePage({ force, reason }) {
       force: force || !!pending?.force,
       reason: !pending || pending.reason === "dom" ? reason : pending.reason,
     };
+    if (reason === "overlay") return; // nothing to cancel: the screen didn't change
     if (force && inflight) {
       // A manual retranslate wins: cancel the running API call instead of
       // waiting for it. Tokens it already used are still billed.
@@ -291,7 +292,7 @@ async function translateActivePage({ force, reason }) {
     // The reader re-renders now and then without the page changing. Hiding
     // the overlay to check made the original text flash, so compare the
     // screen as it is, overlay included, with how it looked when drawn.
-    if (!force && reason === "dom" && settings.overlay) {
+    if (!force && (reason === "dom" || reason === "overlay") && settings.overlay) {
       const { overlayHash } = await chrome.storage.session.get("overlayHash");
       try {
         if (overlayHash && (await captureHash(tab.windowId)) === overlayHash) {

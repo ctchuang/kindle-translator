@@ -12,15 +12,19 @@ function findColumns(img) {
   // Ink per pixel column, skipping rows to keep it cheap.
   const ink = new Uint32Array(w);
   const step = Math.max(1, Math.round(h / 600));
-  for (let y = 0; y < h; y += step) {
+  let rows = 0;
+  for (let y = 0; y < h; y += step, rows++) {
     const row = y * w;
     for (let x = 0; x < w; x++) if (Math.abs(data[row + x] - bg) > 60) ink[x]++;
   }
+  // "Blank" allows a little ink: the reader's progress slider is a thin line
+  // across both pages, and with it the gutter is never perfectly empty.
+  const tolerance = Math.ceil(rows * 0.03);
   // Widest blank run in the middle 40% of the width.
   let best = null;
   let start = -1;
   for (let x = Math.round(w * 0.3); x <= Math.round(w * 0.7); x++) {
-    const blank = ink[x] === 0 && x < Math.round(w * 0.7);
+    const blank = ink[x] <= tolerance && x < Math.round(w * 0.7);
     if (blank && start < 0) start = x;
     if (!blank && start >= 0) {
       if (!best || x - start > best[1] - best[0]) best = [start, x];

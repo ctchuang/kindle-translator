@@ -14,6 +14,14 @@
     button { background:var(--accent); color:#fff; border:0; border-radius:6px; padding:6px 12px; cursor:pointer; font-size:13px; }
     button.ghost { background:transparent; color:var(--accent); border:1px solid var(--border); }
     label { display:flex; align-items:center; gap:4px; color:var(--muted); }
+    .seg { width:100%; display:flex; align-items:center; gap:0; color:var(--muted); }
+    .seg span { margin-right:8px; }
+    .seg button { flex:1; background:transparent; color:var(--accent); border:1px solid var(--accent); border-radius:0; padding:7px 0; font-size:14px; font-weight:600; }
+    .seg button:first-of-type { border-radius:6px 0 0 6px; }
+    .seg button:last-of-type { border-radius:0 6px 6px 0; border-left:0; }
+    .seg button[aria-checked="true"] { background:var(--accent); color:#fff; }
+    #overlayHint { width:100%; margin-top:-4px; color:var(--muted); font-size:12px; }
+    #overlayHint[hidden] { display:none; }
     #status { width:100%; color:var(--muted); font-size:12px; min-height:1em; white-space:pre-wrap; }
     #status.err { color:var(--err); }
     /* While translating: a tinted pill with a pulsing dot, so it's visible at a glance. */
@@ -38,7 +46,12 @@
   <header>
     <button id="translate">翻譯這一頁</button>
     <label><input type="checkbox" id="auto" /> 翻頁自動翻譯</label>
-    <label title="關掉時只在側邊欄顯示譯文，書頁維持原文"><input type="checkbox" id="overlay" /> 譯文蓋在書頁上</label>
+    <div class="seg" id="overlay" role="radiogroup" title="書頁上要顯示譯文還是原文；選原文時譯文只顯示在側邊欄">
+      <span>書頁顯示</span>
+      <button role="radio" data-on="true">譯文</button>
+      <button role="radio" data-on="false">原文</button>
+    </div>
+    <div id="overlayHint">本頁尚未翻譯，翻好後選「譯文」才會蓋上去</div>
     <button class="ghost" id="clear">清空</button>
     <button class="ghost" id="options">設定</button>
     <div id="status"></div>

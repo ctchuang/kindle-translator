@@ -74,6 +74,7 @@ new MutationObserver((mutations) => {
 
 let root = null;
 let turn = 0; // bumped on every page-turn hint; stale overlays are dropped
+let enabled = true; // the side panel's translation / original switch
 
 function isOverlayNode(node) {
   return root !== null && (node === root || root.contains(node));
@@ -100,6 +101,13 @@ function ensureRoot() {
 
 function clearOverlay() {
   root?.replaceChildren();
+}
+
+// Turning the switch to "original" only hides the overlay, so switching back
+// shows the same page's translation instantly (the background then checks
+// it still matches the screen).
+function applyEnabled() {
+  if (root) root.style.display = enabled ? "" : "none";
 }
 
 function showOverlay(blocks) {
@@ -206,6 +214,16 @@ function fitText(box) {
 }
 
 if (IS_TOP) {
+  chrome.storage.sync.get({ overlay: true }).then((v) => {
+    enabled = v.overlay;
+    applyEnabled();
+  });
+  chrome.storage.onChanged.addListener((changes, area) => {
+    if (area !== "sync" || !changes.overlay) return;
+    enabled = changes.overlay.newValue;
+    applyEnabled();
+  });
+
   window.addEventListener("message", (e) => {
     if (e.data?.type === TURN_MSG) onTurnHint();
   });

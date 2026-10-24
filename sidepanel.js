@@ -79,7 +79,11 @@ function onMessage(msg) {
   if (msg.type === "working") startTicker();
   // The button retranslates (skipping the cache) only while the translation on
   // screen is for the page still showing; otherwise it's the plain action.
-  if (msg.type === "pageState") translateBtn.textContent = msg.retranslate ? "重新翻譯本頁" : "翻譯這一頁";
+  if (msg.type === "pageState") {
+    // retranslate: the screen shows a page that already has a translation.
+    translateBtn.textContent = msg.retranslate ? "重新翻譯本頁" : "翻譯這一頁";
+    document.getElementById("overlayHint").hidden = msg.retranslate;
+  }
   if (msg.type === "idle" && ticker) setStatus("");
   if (msg.type === "result") {
     setStatus("");
@@ -125,10 +129,15 @@ document.getElementById("clear").onclick = () => {
 chrome.storage.sync.get({ autoTranslate: true }).then(({ autoTranslate }) => (auto.checked = autoTranslate));
 auto.onchange = () => chrome.storage.sync.set({ autoTranslate: auto.checked });
 
-const overlay = document.getElementById("overlay");
-chrome.storage.sync.get({ overlay: true }).then((v) => (overlay.checked = v.overlay));
-overlay.onchange = async () => {
-  // Save first so the background reads the new value when it re-captures.
-  await chrome.storage.sync.set({ overlay: overlay.checked });
-  port.postMessage({ type: "overlayChanged", on: overlay.checked });
-};
+// Translation / original switch. The setting is the single source of truth:
+// the page's floating button writes it too, and the background and the page
+// react to the change.
+const overlayButtons = document.querySelectorAll("#overlay button");
+function showOverlayState(on) {
+  for (const b of overlayButtons) b.setAttribute("aria-checked", String(b.dataset.on === String(on)));
+}
+chrome.storage.sync.get({ overlay: true }).then((v) => showOverlayState(v.overlay));
+chrome.storage.onChanged.addListener((changes, area) => {
+  if (area === "sync" && changes.overlay) showOverlayState(changes.overlay.newValue);
+});
+for (const b of overlayButtons) b.onclick = () => chrome.storage.sync.set({ overlay: b.dataset.on === "true" });
