@@ -138,15 +138,58 @@ async function contentHash(dataUrl) {
   return [...new Uint8Array(buf)].map((b) => b.toString(16).padStart(2, "0")).join("");
 }
 
+// Chrome allows only 2 captureVisibleTab calls per second
+// (MAX_CAPTURE_VISIBLE_TAB_CALLS_PER_SECOND) and throws past that. Several
+// frames can report a page turn at once, each triggering a check, so every
+// capture goes through this queue and is spaced out.
+const CAPTURE_GAP_MS = 600;
+let captureChain = Promise.resolve();
+let lastCaptureAt = 0;
+
+function capture(windowId) {
+  const run = captureChain.then(async () => {
+    const wait = lastCaptureAt + CAPTURE_GAP_MS - Date.now();
+    if (wait > 0) await new Promise((r) => setTimeout(r, wait));
+    try {
+      return await chrome.tabs.captureVisibleTab(windowId, { format: "jpeg", quality: 85 });
+    } finally {
+      lastCaptureAt = Date.now();
+    }
+  });
+  captureChain = run.catch(() => {});
+  return run;
+}
+
 async function captureHash(windowId) {
-  return contentHash(await chrome.tabs.captureVisibleTab(windowId, { format: "jpeg", quality: 85 }));
+  return contentHash(await capture(windowId));
 }
 
 // While a request runs, any page-turn signal (even plain DOM churn, or an
 // Enter on the arrow button that no key handler recognises) re-captures the
 // screen: if the text area changed, the running request is for a page that's
 // gone, so cancel it.
+let checking = false;
+let recheck = false;
+
 async function cancelIfPageChanged() {
+  // Collapse a burst of signals into one running check plus one follow-up,
+  // so they don't pile up captures ahead of the next real translation.
+  if (checking) {
+    recheck = true;
+    return;
+  }
+  checking = true;
+  try {
+    do {
+      recheck = false;
+      await checkPageOnce();
+    } while (recheck);
+  } finally {
+    checking = false;
+  }
+}
+
+async function checkPageOnce() {
   const page = inflightPage;
   if (!page) return;
   try {
@@ -205,7 +248,7 @@ async function translateActivePage({ force }) {
     }
     await new Promise((r) => setTimeout(r, 80));
 
-    const dataUrl = await chrome.tabs.captureVisibleTab(tab.windowId, { format: "jpeg", quality: 85 });
+    const dataUrl = await capture(tab.windowId);
     log(`截圖完成（${Math.round((dataUrl.length * 3) / 4 / 1024)} KB）`);
     const hash = await contentHash(dataUrl);
     const sameAsLast = (await swapLastHash(hash)) === hash;
