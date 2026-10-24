@@ -361,6 +361,7 @@ function finishBlocks(raw, image) {
     out.push({
       kind: b.kind,
       text: b.text.trim(),
+      lines: Math.max(1, Math.round(Number(b.lines) || 1)),
       box: [x0 / W, y0 / H, x1 / W, y1 / H],
       bg: rgb(bg),
       fg: rgb(sampleInk(image, x0, y0, x1, y1, bg)),
@@ -455,9 +456,10 @@ const BLOCKS_SCHEMA = {
           y0: { type: "integer" },
           x1: { type: "integer" },
           y1: { type: "integer" },
+          lines: { type: "integer" },
           text: { type: "string" },
         },
-        required: ["kind", "x0", "y0", "x1", "y1", "text"],
+        required: ["kind", "x0", "y0", "x1", "y1", "lines", "text"],
         additionalProperties: false,
       },
     },
@@ -470,7 +472,7 @@ const BLOCKS_SCHEMA = {
 function buildPrompt(targetLang, width, height) {
   return `這是 Kindle Cloud Reader 的一張螢幕截圖，大小 ${width}×${height} 像素。畫面上是使用者正在閱讀的一本已出版的書，請逐段翻譯給使用者閱讀。
 1. 找出截圖中書本內文的每個區塊：標題、段落、引文、清單項目、圖說、註腳各算一個區塊。忽略閱讀器介面、選單、頁碼、閱讀進度百分比；圖片和表格本身不要框。
-2. 每個區塊給出緊貼原文字的外框 x0, y0（左上）與 x1, y1（右下），單位是這張截圖的像素。雙頁或多欄時每欄分開框，不要一個框橫跨兩欄。
+2. 每個區塊給出緊貼原文字的外框 x0, y0（左上）與 x1, y1（右下），單位是這張截圖的像素。雙頁或多欄時每欄分開框，不要一個框橫跨兩欄。lines 是這個區塊的原文在截圖中佔幾行。
 3. text 是該區塊翻成${targetLang}的譯文，只放譯文、不附原文。區塊在頁首或頁尾被切斷時，只翻看得到的部分。
 4. 依閱讀順序排列。如果截圖中沒有書本內文（例如載入中或空白頁），回傳空的 blocks。
 5. notes：如果有任何看得到的內文沒有放進 blocks（包括你決定不翻譯的段落），用一句話說明是哪些、為什麼；全部都有放就留空字串。`;
