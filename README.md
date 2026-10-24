@@ -1,3 +1,5 @@
+**繁體中文** | [English](README.en.md)
+
 # Kindle 自動翻譯（Chrome extension 原型）
 
 截取 Kindle Cloud Reader（read.amazon.com 等）目前顯示的頁面，用本機 OCR（Tesseract）辨識每段文字與位置，再交給 Claude Haiku 翻譯成繁體中文。譯文直接蓋在書頁原文的位置上，也同時顯示在 Chrome 側邊欄。
