@@ -148,7 +148,12 @@ async function refreshButtonState(windowId) {
   } catch (_) {}
 }
 
-chrome.commands.onCommand.addListener((cmd) => {
+chrome.commands.onCommand.addListener(async (cmd) => {
+  if (cmd === "toggle-overlay") {
+    const { overlay } = await chrome.storage.sync.get({ overlay: DEFAULTS.overlay });
+    await chrome.storage.sync.set({ overlay: !overlay }); // the page and side panel react to the change
+    return;
+  }
   if (cmd !== "translate-page") return;
   log("手動翻譯：Alt+T");
   translateActivePage({ force: true });

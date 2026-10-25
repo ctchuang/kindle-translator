@@ -50,15 +50,18 @@ function medianByte(data) {
   return 255;
 }
 
-// Group one column's OCR lines ({ x0, y0, x1, y1, text, confidence }) into
-// blocks { kind, x0, y0, x1, y1, lines, text } in reading order. A new
-// paragraph starts at a first-line indent, a larger vertical gap, a change of
-// font size, or after a line that ends short of the right margin.
+// Group one column's OCR lines ({ x0, y0, x1, y1, text, confidence, and
+// optionally maxGap / firstWord from the word boxes }) into blocks
+// { kind, x0, y0, x1, y1, lines, text } in reading order. A new paragraph
+// starts at a first-line indent, a larger vertical gap, a change of font size,
+// or after a line that ends short of the right margin although the next
+// line's first word would have fitted there. Figures are left out.
 function groupParagraphs(lines) {
   lines = lines.filter(isText).sort((a, b) => a.y0 - b.y0);
   if (!lines.length) return [];
-  const heights = lines.map((l) => l.y1 - l.y0);
-  const lineH = median(heights);
+  const lineH = median(lines.map((l) => l.y1 - l.y0));
+  lines = dropFigures(lines, lineH);
+  if (!lines.length) return [];
   const pitches = lines.slice(1).map((l, i) => l.y0 - lines[i].y0);
   const pitch = pitches.length ? median(pitches.filter((p) => p < lineH * 3)) || lineH * 1.5 : lineH * 1.5;
   const left = percentile(lines.map((l) => l.x0), 0.1);
@@ -73,12 +76,19 @@ function groupParagraphs(lines) {
     if (cur) {
       const prev = cur.items[cur.items.length - 1];
       const ph = prev.y1 - prev.y0;
-      fresh =
-        l.y0 - prev.y0 > pitch * 1.4 || // blank line / section break
-        Math.abs(h - ph) > Math.max(h, ph) * 0.3 || // heading vs body
-        l.x0 - left > lineH * 0.8 || // first-line indent
-        prev.x1 < right - lineH * 2 || // previous line ended short
-        big !== cur.big;
+      const resized = Math.abs(h - ph) > Math.max(h, ph) * 0.3; // heading vs body
+      if (big && cur.big) {
+        // A heading wrapped onto more lines: its own, larger line spacing,
+        // and the first line ends wherever the title breaks.
+        fresh = resized || l.y0 - prev.y1 > Math.max(h, ph);
+      } else {
+        fresh =
+          l.y0 - prev.y0 > pitch * 1.4 || // blank line / section break
+          resized ||
+          l.x0 - left > lineH * 0.8 || // first-line indent
+          endedShort(prev, l, Math.max(l.x1, ...cur.items.map((i) => i.x1)), right, lineH) ||
+          big !== cur.big;
+      }
     }
     if (fresh) {
       cur = { items: [], big };
@@ -87,10 +97,11 @@ function groupParagraphs(lines) {
     cur.items.push(l);
   }
   // Headings (chapter numbers and titles) are short lines centred in the
-  // column; height alone misfires on drop caps.
+  // column, or several large lines; height alone misfires on a single line
+  // with a drop cap.
   const isHeading = ([l]) => Math.abs((l.x0 + l.x1) / 2 - (left + right) / 2) < (right - left) * 0.05 && l.x1 - l.x0 < (right - left) * 0.6;
-  return blocks.map(({ items }) => ({
-    kind: items.length === 1 && isHeading(items) ? "heading" : "paragraph",
+  return blocks.map(({ items, big }) => ({
+    kind: (items.length === 1 && isHeading(items)) || (big && items.length > 1) ? "heading" : "paragraph",
     x0: Math.min(...items.map((l) => l.x0)),
     y0: Math.min(...items.map((l) => l.y0)),
     x1: Math.max(...items.map((l) => l.x1)),
@@ -98,6 +109,53 @@ function groupParagraphs(lines) {
     lines: items.length,
     text: joinLines(items.map((l) => l.text.trim())),
   }));
+}
+
+// `prev` ends well short of the right margin, and not just because the next
+// word was too long for the rest of the line. `edge` is the paragraph's own
+// right edge so far: ragged-right text (captions, sidebars) ends every line
+// short of the column's margin.
+function endedShort(prev, next, edge, right, lineH) {
+  if (prev.x1 >= right - lineH * 2) return false;
+  if (!next.firstWord) return true; // no word boxes: go by the margin alone
+  return prev.x1 + lineH * 0.3 + next.firstWord <= edge;
+}
+
+// Leave out figures: their labels and side-by-side notes come back from OCR
+// as lines with gaps between words far wider than any word space, and
+// translating them covers the figure with jumbled text. Lines between two
+// such rows, and short labels just above or below them, are part of the
+// figure too.
+function dropFigures(lines, lineH) {
+  const rows = lines.filter((l) => l.maxGap > lineH * 2);
+  // Mostly wide gaps means the columns weren't split (two pages read as one),
+  // not a figure; dropping them would lose the page.
+  if (!rows.length || rows.length > lines.length / 2) return lines;
+  const drop = new Set(rows);
+  const clusters = [];
+  for (const r of rows) {
+    const c = clusters[clusters.length - 1];
+    if (c && r.y0 - c.y1 < lineH * 3) c.y1 = Math.max(c.y1, r.y1);
+    else clusters.push({ y0: r.y0, y1: r.y1 });
+  }
+  const width = percentile(lines.map((l) => l.x1), 0.9) - percentile(lines.map((l) => l.x0), 0.1);
+  for (const c of clusters) {
+    for (let grew = true; grew; ) {
+      grew = false;
+      for (const l of lines) {
+        if (drop.has(l)) continue;
+        const mid = (l.y0 + l.y1) / 2;
+        const inside = mid > c.y0 && mid < c.y1;
+        const label = l.x1 - l.x0 < width * 0.4 && l.y1 > c.y0 - lineH && l.y0 < c.y1 + lineH;
+        if (!inside && !label) continue;
+        drop.add(l);
+        c.y0 = Math.min(c.y0, l.y0);
+        c.y1 = Math.max(c.y1, l.y1);
+        grew = true;
+      }
+    }
+  }
+  return lines.filter((l) => !drop.has(l));
 }
 
 // Drop OCR noise: page-arrow glyphs, specks, a stray rule read as dashes.

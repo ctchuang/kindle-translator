@@ -22,7 +22,7 @@ The extension's interface is in Chinese; the labels quoted below are followed by
 1. Open Kindle Cloud Reader and open a book.
 2. Click the extension's icon in the toolbar to open the side panel.
 3. Click 「翻譯這一頁」 (translate this page) or press Alt+T. With 「翻頁自動翻譯」 (translate on page turn) checked, a page is translated about 1 second after you turn to it. When the current page is already translated and the screen hasn't changed, the button becomes 「重新翻譯本頁」 (retranslate this page) and skips the cache.
-4. The translation covers the book's paragraphs in place (font size fitted to each box, colors matched to the reader theme). The side panel's 「書頁顯示：譯文｜原文」 (page shows: translation | original) switch, or the small 「顯示原文／顯示譯文」 (show original / show translation) button in the page's bottom-right corner, toggles between them at any time; switching back to the translation is instant, with no new request. Turning or clicking the page clears the overlay until the new page is translated.
+4. The translation covers the book's paragraphs in place (font size fitted to each box, colors matched to the reader theme). The side panel's 「書頁顯示：譯文｜原文」 (page shows: translation | original) switch, or the small 「顯示原文／顯示譯文」 (show original / show translation) button in the page's bottom-right corner, or Alt+O, toggles between them at any time; switching back to the translation is instant, with no new request. Turning or clicking the page clears the overlay until the new page is translated.
 5. The newest page's translation is at the top of the side panel, with a 「複製」 (copy) button.
 
 ## How it works and caveats

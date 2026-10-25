@@ -64,6 +64,12 @@
         "default": "Alt+T"
       },
       "description": "翻譯目前頁面"
+    },
+    "toggle-overlay": {
+      "suggested_key": {
+        "default": "Alt+O"
+      },
+      "description": "書頁切換顯示譯文／原文"
     }
   },
   "content_security_policy": {

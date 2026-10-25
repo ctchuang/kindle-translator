@@ -28,7 +28,8 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
 });
 
 // Recognize each rectangle (page column) of the image separately and return
-// its text lines with boxes in image pixels.
+// its text lines with boxes in image pixels, plus two word measurements the
+// layout code uses: the widest gap between words and the first word's width.
 async function ocr({ image, rects }) {
   const worker = await getWorker();
   const columns = [];
@@ -37,8 +38,13 @@ async function ocr({ image, rects }) {
     columns.push(
       (data.blocks || [])
         .flatMap((b) => b.paragraphs.flatMap((p) => p.lines))
-        .map((l) => ({ ...l.bbox, text: l.text, confidence: l.confidence }))
+        .map((l) => ({ ...l.bbox, text: l.text, confidence: l.confidence, ...wordMetrics(l.words || []) }))
     );
   }
   return { columns };
+}
+
+function wordMetrics(words) {
+  const gaps = words.slice(1).map((w, i) => w.bbox.x0 - words[i].bbox.x1);
+  return { maxGap: Math.max(0, ...gaps), firstWord: words.length ? words[0].bbox.x1 - words[0].bbox.x0 : 0 };
 }
