@@ -89,6 +89,8 @@ Kindle Cloud Reader 的書頁是圖片，沒有可以讀的文字和排版資訊
 
 ## 檔案
 
+詳細設計見 [docs/design.md](docs/design.md)。
+
 - `manifest.json`：Manifest V3 設定
 - `content.js`：在 Kindle 頁面偵測翻頁（按鍵、點擊、DOM 變化），並畫出譯文覆蓋層
 - `background.js`：截圖、OCR 前處理、呼叫 Claude API（結構化輸出）、取樣顏色、快取

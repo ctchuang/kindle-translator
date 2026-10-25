@@ -91,6 +91,8 @@ The model runs on your GPU through [ONNX Runtime Web](https://github.com/microso
 
 ## Files
 
+The detailed design (in Chinese) is in [docs/design.md](docs/design.md).
+
 - `manifest.json`: Manifest V3 configuration
 - `content.js`: detects page turns on the Kindle page (keys, clicks, DOM changes) and draws the translation overlay
 - `background.js`: capture, OCR preprocessing, Claude API calls (structured outputs), color sampling, cache
