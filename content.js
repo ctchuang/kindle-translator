@@ -48,7 +48,7 @@ document.addEventListener(
   true
 );
 
-document.addEventListener("click", () => notify("click"), true);
+document.addEventListener("click", (e) => isToggle(e.target) || notify("click"), true);
 
 document.addEventListener("wheel", () => notify("wheel"), { capture: true, passive: true });
 
@@ -77,7 +77,55 @@ let turn = 0; // bumped on every page-turn hint; stale overlays are dropped
 let enabled = true; // the side panel's translation / original switch
 
 function isOverlayNode(node) {
-  return root !== null && (node === root || root.contains(node));
+  return (root !== null && (node === root || root.contains(node))) || isToggle(node);
+}
+
+// ---- Floating translation / original button (top frame only) ----
+
+// It sits in the bottom-right corner, outside the areas the background hashes
+// and OCRs, so its label changing doesn't look like a new page.
+let toggle = null;
+
+function isToggle(node) {
+  return toggle !== null && toggle.contains(node);
+}
+
+function ensureToggle() {
+  if (toggle) return toggle;
+  toggle = document.createElement("button");
+  toggle.id = "kindle-translator-toggle";
+  Object.assign(toggle.style, {
+    position: "fixed",
+    right: "12px",
+    bottom: "10px",
+    zIndex: "2147483647",
+    padding: "3px 10px",
+    border: "1px solid rgba(128,128,128,.5)",
+    borderRadius: "999px",
+    background: "rgba(128,128,128,.18)",
+    color: "inherit",
+    font: '12px "PingFang TC","Noto Sans TC","Microsoft JhengHei",sans-serif',
+    cursor: "pointer",
+    opacity: "0.75",
+  });
+  toggle.onmouseenter = () => (toggle.style.opacity = "1");
+  toggle.onmouseleave = () => (toggle.style.opacity = "0.75");
+  toggle.onclick = (e) => {
+    e.stopPropagation();
+    try {
+      chrome.storage.sync.set({ overlay: !enabled });
+    } catch (_) {
+      // Extension was reloaded; this content script is orphaned.
+    }
+  };
+  document.documentElement.append(toggle);
+  return toggle;
+}
+
+function showToggle() {
+  const t = ensureToggle();
+  t.textContent = enabled ? "顯示原文" : "顯示譯文";
+  t.title = enabled ? "暫時隱藏譯文（Kindle 翻譯）" : "把譯文蓋回書頁上（Kindle 翻譯）";
 }
 
 function onTurnHint() {
@@ -108,6 +156,7 @@ function clearOverlay() {
 // it still matches the screen).
 function applyEnabled() {
   if (root) root.style.display = enabled ? "" : "none";
+  showToggle();
 }
 
 function showOverlay(blocks) {

@@ -1,8 +1,8 @@
 // Service worker: captures the visible Kindle page, finds and translates each
 // text block, then pushes the blocks to the page (overlay) and the side panel.
 // Two engines:
-// - "ocr": Tesseract reads the text and its positions locally, then Sonnet
-//   (or Haiku) translates the text alone. Fast, and the model never sees a
+// - "ocr": Tesseract reads the text and its positions locally, then Haiku
+//   (or Sonnet) translates the text alone. Fast, and the model never sees a
 //   book page.
 // - "vision": Opus reads the screenshot and translates it in one call.
 
@@ -32,7 +32,7 @@ const FALLBACK = {
 const DEFAULTS = {
   apiKey: "",
   engine: "ocr",
-  textModel: "claude-sonnet-5-5",
+  textModel: "claude-haiku-5-5",
   effort: "low",
   autoTranslate: true,
   targetLang: "繁體中文（台灣用語）",
