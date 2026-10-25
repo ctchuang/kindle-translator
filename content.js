@@ -19,10 +19,17 @@ let pendingReason = null;
 // current overlay is stale. Plain DOM churn (toolbar fading, progress updates)
 // only asks for a re-check; the background skips it if the screen is unchanged.
 function notify(reason, userAction = true) {
-  if (userAction) {
-    if (IS_TOP) onTurnHint();
-    else window.top.postMessage({ type: TURN_MSG }, "*"); // reader content may live in an iframe
+  // Reloading the extension leaves this script running but cut off. Doing
+  // nothing then matters: hiding the overlay without being able to ask the
+  // background to redraw it left the page in English.
+  if (!chrome.runtime?.id) return;
+  if (userAction && !IS_TOP) {
+    // The reader content may live in an iframe; the top frame owns the
+    // overlay, so it hides it and reports the turn itself.
+    window.top.postMessage({ type: TURN_MSG, reason }, "*");
+    return;
   }
+  if (userAction) onTurnHint();
   // A page turn re-renders the page right after the click/key, so "dom" would
   // otherwise overwrite the user action and the background wouldn't cancel the
   // in-flight request.
@@ -52,7 +59,17 @@ document.addEventListener("click", (e) => isToggle(e.target) || notify("click"),
 
 document.addEventListener("wheel", () => notify("wheel"), { capture: true, passive: true });
 
-window.addEventListener("resize", () => notify("resize"));
+// The reader fires resize events when its toolbar slides in or out, without
+// the page moving. Only a real change of the top window's size moves the
+// text; anything else is just a re-check, which keeps the overlay up.
+let lastSize = `${innerWidth}x${innerHeight}`;
+window.addEventListener("resize", () => {
+  const size = `${innerWidth}x${innerHeight}`;
+  const changed = size !== lastSize;
+  lastSize = size;
+  if (IS_TOP && changed) notify("resize");
+  else notify("dom", false);
+});
 
 new MutationObserver((mutations) => {
   // Ignore tiny changes (cursor blink, tooltips); react to real re-renders.
@@ -278,13 +295,30 @@ if (IS_TOP) {
   });
 
   window.addEventListener("message", (e) => {
-    if (e.data?.type === TURN_MSG) onTurnHint();
+    if (e.data?.type === TURN_MSG) notify(e.data.reason || "frame");
   });
+
+  // Reply once the change is on screen: the background takes a screenshot
+  // next, and a fixed short wait sometimes caught the old overlay still
+  // painted (a large page at 3x takes a while), so OCR read our own Chinese.
+  // A frame callback runs before the next paint; the second one runs after
+  // it. The timeout covers a hidden tab, which doesn't paint at all.
+  const afterPaint = (reply) => {
+    let done = false;
+    const send = () => done || ((done = true), reply());
+    requestAnimationFrame(() => requestAnimationFrame(send));
+    setTimeout(send, 500);
+    return true; // keep the channel open for the async reply
+  };
 
   chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
     if (msg.type === "clearOverlay") {
       clearOverlay();
-      sendResponse({ turn });
+      return afterPaint(() => sendResponse({ turn }));
+    } else if (msg.type === "debugLog") {
+      console.log(`[Kindle 翻譯] ${msg.text}`);
+    } else if (msg.type === "overlayState") {
+      sendResponse({ shown: enabled && !!root?.childElementCount });
     } else if (msg.type === "overlay") {
       if (msg.turn !== undefined && msg.turn !== turn) {
         sendResponse({ shown: false, reason: "請求期間翻頁了，已丟棄舊頁的譯文" });
@@ -292,7 +326,7 @@ if (IS_TOP) {
         sendResponse({ shown: false, reason: "Claude 沒有在這張截圖裡找到內文區塊" });
       } else {
         showOverlay(msg.blocks);
-        sendResponse({ shown: true });
+        return afterPaint(() => sendResponse({ shown: true }));
       }
     }
   });

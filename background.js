@@ -5,7 +5,7 @@
 //   translates the text alone, optionally with Sonnet reviewing the draft. Fast, and the model never sees a book page.
 // - "vision": Opus reads the screenshot and translates it in one call.
 
-importScripts("ocr-layout.js");
+importScripts("ocr-layout.js", "page-sig.js");
 
 // Vision engine: only Opus. In testing, Sonnet 5.5 and Haiku 5.5 declined to
 // translate screenshots of Kindle book pages (citing copyright).
@@ -77,7 +77,7 @@ let pending = null; // { force, reason } of a request waiting for the current on
 // and posts results. When the page changes under it, it isn't cancelled but
 // moved to the background: it finishes, fills the cache, and turning back to
 // that page is then instant. Each job: { controller (cancels its OCR wait and
-// API calls), page: { hash, windowId } once captured, detached, done (resolves
+// API calls), page: { sig, windowId } once captured, detached, done (resolves
 // to the blocks it cached, or null) }.
 let current = null;
 const background = new Set();
@@ -86,34 +86,67 @@ const background = new Set();
 const MAX_BACKGROUND = 1;
 
 // Chrome stops this service worker after ~30 s idle, wiping module state, so
-// the page cache and last screenshot hash live in session storage (cleared
-// when the browser closes).
-async function cacheGet(hash) {
-  const blocks = (await chrome.storage.session.get(`page:${hash}`))[`page:${hash}`];
+// the page cache and last screen fingerprint live in session storage
+// (cleared when the browser closes). Pages are found by fingerprint
+// (samePage), so the cache keeps an index of [id, fingerprint] and the
+// blocks under page:<id>.
+const CACHE_PAGES = 500;
+let cacheChain = Promise.resolve(); // index updates one at a time
+
+async function cacheGet(sig) {
+  const { pageIndex = [] } = await chrome.storage.session.get("pageIndex");
+  const hit = pageIndex.find(([, s]) => samePage(s, sig));
+  if (!hit) {
+    if (pageIndex.length) log(`快取裡沒有這一頁（最接近的差異 ${diffText(Math.min(...pageIndex.map(([, s]) => pageDiff(s, sig))))}）`);
+    return undefined;
+  }
+  log(`快取裡有這一頁（差異 ${pct(hit[1], sig)}）`);
+  const blocks = (await chrome.storage.session.get(`page:${hit[0]}`))[`page:${hit[0]}`];
   return blocks?.length ? blocks : undefined; // empty results were never meant to stick
 }
 
-async function cacheSet(hash, blocks) {
-  await chrome.storage.session.set({ [`page:${hash}`]: blocks });
+// Difference between two fingerprints for the log, e.g. "3%".
+function pct(a, b) {
+  return diffText(pageDiff(a, b));
 }
 
-// Content hash of the page whose translation is currently shown. While the
+function diffText(d) {
+  return `${Math.round(d * 100)}%`;
+}
+
+function cacheSet(sig, blocks) {
+  const run = cacheChain.then(async () => {
+    const { pageIndex = [] } = await chrome.storage.session.get("pageIndex");
+    let entry = pageIndex.find(([, s]) => samePage(s, sig));
+    if (!entry) {
+      entry = [crypto.randomUUID(), sig];
+      pageIndex.push(entry);
+    }
+    const dropped = pageIndex.splice(0, Math.max(0, pageIndex.length - CACHE_PAGES));
+    if (dropped.length) await chrome.storage.session.remove(dropped.map(([id]) => `page:${id}`));
+    await chrome.storage.session.set({ pageIndex, [`page:${entry[0]}`]: blocks });
+  });
+  cacheChain = run.catch(() => {});
+  return run;
+}
+
+// Fingerprint of the page whose translation is currently shown. While the
 // screen still matches it, the side-panel button retranslates (skipping the
 // cache) and is labelled that way.
-async function getShownHash() {
-  return (await chrome.storage.session.get("shownHash")).shownHash;
+async function getShownSig() {
+  return (await chrome.storage.session.get("shownSig")).shownSig;
 }
 
-async function setShownHash(hash) {
-  if (hash) await chrome.storage.session.set({ shownHash: hash });
-  else await chrome.storage.session.remove("shownHash");
-  broadcast({ type: "pageState", retranslate: !!hash });
+async function setShownSig(sig) {
+  if (sig) await chrome.storage.session.set({ shownSig: sig });
+  else await chrome.storage.session.remove("shownSig");
+  broadcast({ type: "pageState", retranslate: !!sig });
 }
 
-async function swapLastHash(hash) {
-  const { lastHash } = await chrome.storage.session.get("lastHash");
-  await chrome.storage.session.set({ lastHash: hash });
-  return lastHash;
+async function swapLastSig(sig) {
+  const { lastSig } = await chrome.storage.session.get("lastSig");
+  await chrome.storage.session.set({ lastSig: sig });
+  return lastSig;
 }
 
 chrome.runtime.onInstalled.addListener(() => {
@@ -135,8 +168,9 @@ chrome.runtime.onConnect.addListener((port) => {
   if (port.name !== "sidepanel") return;
   panelPorts.add(port);
   port.onDisconnect.addListener(() => panelPorts.delete(port));
+  for (const msg of unsent.splice(0)) port.postMessage(msg);
   // Button label and "not translated yet" hint for a freshly opened panel.
-  getShownHash().then((hash) => port.postMessage({ type: "pageState", retranslate: !!hash })).catch(() => {});
+  getShownSig().then((sig) => port.postMessage({ type: "pageState", retranslate: !!sig })).catch(() => {});
   port.onMessage.addListener((msg) => {
     if (msg.type === "translateNow") {
       log("手動翻譯：按下「翻譯這一頁」");
@@ -148,23 +182,36 @@ chrome.runtime.onConnect.addListener((port) => {
 chrome.runtime.onMessage.addListener(async (msg, sender) => {
   if (msg.type !== "pageTurned") return;
   const { autoTranslate } = await getSettings();
-  if (panelPorts.size === 0 || !sender.tab?.active) return;
   // Only translate when the panel is open, so we don't spend tokens silently.
+  if (!(await panelOpen()) || !sender.tab?.active) return;
+  logTabId = sender.tab.id;
   if (!autoTranslate) return refreshButtonState(sender.tab.windowId);
-  log(`偵測到翻頁（${msg.reason}）`);
+  // Key, click, wheel and window resize hide the overlay on the page at once;
+  // "dom" leaves it up until the check below.
+  const cleared = msg.reason !== "dom" ? "，書頁上的譯文已先清掉" : "";
+  log(`偵測到翻頁（${msg.reason}${cleared}）`);
   translateActivePage({ force: false, reason: msg.reason });
 });
+
+// Whether a side panel is open. Not panelPorts: Chrome stops this worker
+// after 30 s idle, and the page-turn message that wakes it arrives before the
+// panel has reconnected, so a click after a pause was dropped and the page,
+// its overlay already hidden, stayed in English.
+async function panelOpen() {
+  if (panelPorts.size) return true;
+  return (await chrome.runtime.getContexts({ contextTypes: ["SIDE_PANEL"] })).length > 0;
+}
 
 // Without auto-translate nothing else re-checks the screen after a page turn,
 // so do it here to keep the button label honest.
 async function refreshButtonState(windowId) {
   if (current) return;
   try {
-    const shown = await getShownHash();
+    const shown = await getShownSig();
     if (!shown) return;
-    const now = await captureHash(windowId);
-    const { overlayHash } = await chrome.storage.session.get("overlayHash");
-    if (now !== shown && now !== overlayHash) await setShownHash(null);
+    const now = await captureSig(windowId);
+    const { overlaySig } = await chrome.storage.session.get("overlaySig");
+    if (!samePage(now, shown) && !samePage(now, overlaySig)) await setShownSig(null);
   } catch (_) {}
 }
 
@@ -192,7 +239,23 @@ function log(text, image) {
   broadcast({ type: "log", text, at: Date.now(), image });
 }
 
+// Messages sent while the panel is reconnecting (the worker just woke up)
+// are kept and delivered when it's back, so the log has no holes.
+const unsent = [];
+
+// The log also goes to the reader tab's console ("[Kindle 翻譯]"), so it can
+// be read alongside the page's own state when debugging.
+let logTabId = null;
+
 function broadcast(msg) {
+  if (msg.type === "log" && logTabId !== null) {
+    chrome.tabs.sendMessage(logTabId, { type: "debugLog", text: `${new Date(msg.at).toTimeString().slice(0, 8)}.${String(msg.at % 1000).padStart(3, "0")} ${msg.text}` }, { frameId: 0 }).catch(() => {});
+  }
+  if (!panelPorts.size && msg.type !== "pageState") {
+    unsent.push(msg);
+    if (unsent.length > 100) unsent.shift();
+    return;
+  }
   for (const p of panelPorts) {
     try {
       p.postMessage(msg);
@@ -211,19 +274,25 @@ const CONTENT_CROP = { x0: 0.09, y0: 0.08, x1: 0.91, y1: 0.91 };
 
 // Identifies the page by its text area only, so reader-UI changes don't make
 // the same page look new (cache miss, paid retranslation) and a real page
-// change is noticed however it happened (arrow, Enter, slider, table of contents).
-async function contentHash(dataUrl) {
+// change is noticed however it happened (arrow, Enter, slider, table of
+// contents). A coarse fingerprint compared with samePage (page-sig.js), not
+// an exact hash: toolbar animation, hover effects and JPEG noise change a few
+// pixels of the same page.
+async function pageSigOf(dataUrl) {
   const bitmap = await createImageBitmap(await (await fetch(dataUrl)).blob());
   const sx = bitmap.width * CONTENT_CROP.x0;
   const sy = bitmap.height * CONTENT_CROP.y0;
   const sw = bitmap.width * (CONTENT_CROP.x1 - CONTENT_CROP.x0);
   const sh = bitmap.height * (CONTENT_CROP.y1 - CONTENT_CROP.y0);
-  const w = 480;
+  const w = SIG_WIDTH;
   const h = Math.round((w * sh) / sw);
   const ctx = new OffscreenCanvas(w, h).getContext("2d");
+  ctx.imageSmoothingQuality = "high"; // average the area, like the Node tests
   ctx.drawImage(bitmap, sx, sy, sw, sh, 0, 0, w, h);
-  const buf = await crypto.subtle.digest("SHA-256", ctx.getImageData(0, 0, w, h).data);
-  return [...new Uint8Array(buf)].map((b) => b.toString(16).padStart(2, "0")).join("");
+  const rgba = ctx.getImageData(0, 0, w, h).data;
+  const data = new Uint8Array(w * h);
+  for (let i = 0; i < data.length; i++) data[i] = (rgba[i * 4] * 299 + rgba[i * 4 + 1] * 587 + rgba[i * 4 + 2] * 114) / 1000;
+  return pageSignature({ width: w, height: h, data });
 }
 
 // Chrome allows only 2 captureVisibleTab calls per second
@@ -248,8 +317,8 @@ function capture(windowId) {
   return run;
 }
 
-async function captureHash(windowId) {
-  return contentHash(await capture(windowId));
+async function captureSig(windowId) {
+  return pageSigOf(await capture(windowId));
 }
 
 // While a request runs, any page-turn signal (even plain DOM churn, or an
@@ -283,16 +352,18 @@ async function checkPageOnce() {
   if (!page) return;
   let now;
   try {
-    now = await captureHash(page.windowId);
+    now = await captureSig(page.windowId);
   } catch (_) {
     return; // tab not capturable right now (e.g. another tab is in front)
   }
-  if (now !== page.hash && current === job) detach(job, now);
+  if (current !== job) return;
+  if (samePage(now, page.sig)) log(`檢查：還是同一頁（差異 ${pct(now, page.sig)}），繼續`);
+  else detach(job, now, pct(now, page.sig));
 }
 
 // Let the foreground job finish in the background and start on the new page,
-// whose content hash is `now`.
-function detach(job, now) {
+// whose content sig is `now`.
+function detach(job, now, diff) {
   job.detached = true;
   if (job.waiting) {
     // It was only waiting on a background job, which keeps going anyway.
@@ -301,10 +372,10 @@ function detach(job, now) {
     return;
   }
   background.add(job);
-  log("畫面已換頁：先前那一頁改在背景翻完並存快取，先翻目前畫面");
+  log(`畫面已換頁（差異 ${diff}）：先前那一頁改在背景翻完並存快取，先翻目前畫面`);
   if (background.size > MAX_BACKGROUND) {
     // Not the one for the page now on screen: turning back to it waits for it.
-    const oldest = [...background].find((j) => j.page.hash !== now);
+    const oldest = [...background].find((j) => !samePage(j.page.sig, now));
     background.delete(oldest);
     oldest.controller.abort();
     log(oldest === job ? "背景翻譯已達上限，取消剛翻走的那一頁" : "背景翻譯已達上限，取消最早的一個");
@@ -330,12 +401,12 @@ function release(job) {
 
 // Turning back to a page whose translation is still running in the
 // background: wait for it rather than paying for the page twice.
-async function backgroundResult(job, hash, windowId) {
-  const running = [...background].find((j) => j.page?.hash === hash);
+async function backgroundResult(job, sig, windowId) {
+  const running = [...background].find((j) => j.page && samePage(j.page.sig, sig));
   if (!running) return undefined;
   log("這一頁還在背景翻譯，等它完成");
   broadcast({ type: "working" });
-  job.page = { hash, windowId }; // so turning away again releases the wait
+  job.page = { sig, windowId }; // so turning away again releases the wait
   job.waiting = true;
   try {
     return (await running.done) ?? undefined;
@@ -378,7 +449,7 @@ async function translateActivePage({ force, reason }) {
   } catch (err) {
     if (err.name === "AbortError") {
       // Forget this screen so the queued run doesn't skip it as "unchanged".
-      if (!job.detached) await chrome.storage.session.remove("lastHash");
+      if (!job.detached) await chrome.storage.session.remove("lastSig");
       log(job.detached ? "已取消一個背景翻譯" : "已取消前一個請求");
     } else if (job.detached) {
       log(`背景翻譯失敗：${err.message || err}`);
@@ -396,6 +467,7 @@ async function translateActivePage({ force, reason }) {
 
 async function runJob(job, { force, reason }) {
   const [tab] = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
+  if (tab && READER_RE.test(tab.url || "")) logTabId = tab.id;
   if (!tab || !READER_RE.test(tab.url || "")) {
     broadcast({ type: "error", text: "目前分頁不是 Kindle Cloud Reader。" });
     return;
@@ -408,15 +480,28 @@ async function runJob(job, { force, reason }) {
 
   // The reader re-renders now and then without the page changing. Hiding
   // the overlay to check made the original text flash, so compare the
-  // screen as it is, overlay included, with how it looked when drawn.
+  // screen as it is, overlay included, with how it looked when drawn. Ask
+  // the page too: a sig taken while the overlay happened to be hidden would
+  // otherwise match the bare page and keep the translation off for good.
   if (!force && (reason === "dom" || reason === "overlay") && settings.overlay) {
-    const { overlayHash } = await chrome.storage.session.get("overlayHash");
+    const { overlaySig } = await chrome.storage.session.get("overlaySig");
     try {
-      if (overlayHash && (await captureHash(tab.windowId)) === overlayHash) {
-        log("畫面沒變（譯文還在），略過");
+      const shown = (await sendToPage(tab.id, { type: "overlayState" }))?.shown;
+      const now = overlaySig && shown ? await captureSig(tab.windowId) : null;
+      if (now && samePage(now, overlaySig)) {
+        log(`畫面沒變（譯文還在，差異 ${pct(now, overlaySig)}），略過`);
         return;
       }
-    } catch (_) {}
+      log(
+        !overlaySig
+          ? "重新檢查：沒有譯文畫面的紀錄"
+          : !shown
+            ? "重新檢查：頁面上沒有顯示譯文"
+            : `重新檢查：畫面跟畫上譯文時不同（差異 ${Math.round(pageDiff(overlaySig, now) * 100)}%）`
+      );
+    } catch (err) {
+      log(`重新檢查失敗：${err.message}`);
+    }
   }
 
   // Hide our own overlay first so it doesn't end up in the screenshot.
@@ -426,26 +511,27 @@ async function runJob(job, { force, reason }) {
   if (settings.overlay) {
     try {
       turn = (await sendToPage(tab.id, { type: "clearOverlay" }))?.turn;
-      await chrome.storage.session.remove("overlayHash");
+      await chrome.storage.session.remove("overlaySig");
       log("已清掉頁面上的覆蓋層");
     } catch (err) {
       // Reported again by showOnPage; still translate for the side panel.
       log(`清除覆蓋層失敗：${err.message}`);
     }
   }
-  await new Promise((r) => setTimeout(r, 80));
 
   const dataUrl = await capture(tab.windowId);
   const capturedAt = Date.now();
   log(`截圖完成（${Math.round((dataUrl.length * 3) / 4 / 1024)} KB）`);
-  const hash = await contentHash(dataUrl);
-  const sameAsLast = (await swapLastHash(hash)) === hash;
+  const sig = await pageSigOf(dataUrl);
+  const lastSig = await swapLastSig(sig);
+  const sameAsLast = samePage(lastSig, sig);
+  if (lastSig) log(`跟上一次截圖的差異 ${pct(lastSig, sig)}`);
 
   // The button reads "重新翻譯本頁" while the shown translation is for this
   // very screen; pressing it then means "ask Claude again", not "use cache".
-  const retranslate = force && hash === (await getShownHash());
-  if (retranslate) log("畫面沒變：重新翻譯本頁，不使用快取");
-  const cached = retranslate ? null : (await cacheGet(hash)) ?? (await backgroundResult(job, hash, tab.windowId));
+  const retranslate = force && samePage(sig, await getShownSig());
+  if (retranslate) log(`畫面沒變（差異 ${pct(sig, await getShownSig())}）：重新翻譯本頁，不使用快取`);
+  const cached = retranslate ? null : (await cacheGet(sig)) ?? (await backgroundResult(job, sig, tab.windowId));
   if (job.detached) return; // turned away while waiting for the background job
   if (cached) {
     const blocks = cached;
@@ -453,7 +539,7 @@ async function runJob(job, { force, reason }) {
     // Same screen re-captured (e.g. after a stray DOM change): just restore the overlay.
     if (force || !sameAsLast) broadcast({ type: "result", text: blocksToText(blocks), cached: true, thumb: dataUrl });
     if (settings.overlay) await showOnPage(tab.id, blocks, turn);
-    await setShownHash(hash);
+    await setShownSig(sig);
     return;
   }
   if (!force && sameAsLast) {
@@ -462,10 +548,10 @@ async function runJob(job, { force, reason }) {
   }
 
   broadcast({ type: "working", thumb: dataUrl });
-  await setShownHash(null);
+  await setShownSig(null);
   const vision = settings.engine === "vision";
   const image = await prepareImage(dataUrl, vision);
-  job.page = { hash, windowId: tab.windowId };
+  job.page = { sig, windowId: tab.windowId };
   const signal = job.controller.signal;
   const translate = vision ? visionTranslator(settings, image, signal) : await ocrTranslator(settings, dataUrl, image, signal);
   let reply;
@@ -483,7 +569,7 @@ async function runJob(job, { force, reason }) {
   if (job.detached) {
     // Turned away from this page: just keep the translation for later.
     if (blocks.length && !summary) {
-      await cacheSet(hash, blocks);
+      await cacheSet(sig, blocks);
       job.finish(blocks);
       log(`背景翻完先前那一頁，已存快取（${blocks.length} 個區塊，從截圖起共 ${seconds(capturedAt)} 秒）`);
     } else {
@@ -504,25 +590,26 @@ async function runJob(job, { force, reason }) {
   }
   // A summary isn't cached, so revisiting the page asks for a translation again.
   if (!summary) {
-    await cacheSet(hash, blocks);
+    await cacheSet(sig, blocks);
     job.finish(blocks);
   }
   broadcast({ type: "result", text: blocksToText(blocks), thumb: dataUrl, fallbackModel, summary });
   // After the result, which clears the status line.
   if (summary) broadcast({ type: "warn", text: "Claude 只給了摘要，不是完整翻譯。可以按「重新翻譯本頁」再試。" });
-  if (!settings.overlay) await setShownHash(hash); // shown in the side panel only
+  if (!settings.overlay) await setShownSig(sig); // shown in the side panel only
   if (settings.overlay) {
     // The page may have changed in the last moments without a signal we
     // caught; never draw one page's translation over another.
-    let now = hash;
+    let now = sig;
     try {
-      now = await captureHash(tab.windowId);
+      now = await captureSig(tab.windowId);
     } catch (_) {}
-    if (now === hash) {
+    if (samePage(now, sig)) {
+      if (now !== sig) log(`畫上譯文前再確認：同一頁（差異 ${pct(now, sig)}）`);
       await showOnPage(tab.id, blocks, turn);
-      await setShownHash(hash);
+      await setShownSig(sig);
     } else {
-      log("翻譯期間畫面已換頁，這份譯文不畫上去（已存快取）");
+      log(`翻譯期間畫面已換頁（差異 ${pct(now, sig)}），這份譯文不畫上去（已存快取）`);
       pending ??= { force: false };
     }
   }
@@ -560,16 +647,17 @@ async function showOnPage(tabId, blocks, turn) {
     log(`覆蓋層沒有顯示：${res?.reason || "頁面沒有回應"}`);
   } else {
     log(`覆蓋層已畫上 ${blocks.length} 個區塊`);
-    await rememberOverlayHash(tabId);
+    await rememberOverlaySig(tabId);
   }
 }
 
 // Hash of the screen with the overlay on it, for the "dom" re-check above.
-async function rememberOverlayHash(tabId) {
-  await new Promise((r) => setTimeout(r, 150)); // let the overlay paint
+// Not if the overlay was switched off meanwhile: that would be the bare page.
+async function rememberOverlaySig(tabId) {
   try {
     const { windowId } = await chrome.tabs.get(tabId);
-    await chrome.storage.session.set({ overlayHash: await captureHash(windowId) });
+    const sig = await captureSig(windowId);
+    if ((await sendToPage(tabId, { type: "overlayState" }))?.shown) await chrome.storage.session.set({ overlaySig: sig });
   } catch (_) {}
 }
 

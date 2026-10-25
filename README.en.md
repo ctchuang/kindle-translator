@@ -6,7 +6,7 @@ Captures the page currently shown in Kindle Cloud Reader (read.amazon.com and ot
 
 ![Example: a two-page spread of Build a Reasoning Model (From Scratch), with the body text and captions translated in place and figures 1.1 and 1.2 left as they are, and the side panel on the right](docs/example.png)
 
-> **Status: prototype, usable for everyday reading (current version 0.6.1).** Tested on Kindle Cloud Reader's two-page layout: the translation covers the original text about 9 seconds after a page turn. Paragraphs are occasionally split wrongly, and boxes are occasionally a little off. When the overlay doesn't appear, the side panel's status line shows the reason in red, and the log below it shows each step.
+> **Status: prototype, usable for everyday reading (current version 0.6.2).** Tested on Kindle Cloud Reader's two-page layout: the translation covers the original text about 9 seconds after a page turn. Paragraphs are occasionally split wrongly, and boxes are occasionally a little off. When the overlay doesn't appear, the side panel's status line shows the reason in red, and the log below it shows each step.
 
 The extension's interface is in Chinese; the labels quoted below are followed by their English meaning. The target language can be changed in the options page.
 
@@ -28,7 +28,7 @@ The extension's interface is in Chinese; the labels quoted below are followed by
 ## How it works and caveats
 
 - Pages are only translated automatically while the side panel is open, so no API credit is spent in the background.
-- A page is identified by a hash of its text area in the screenshot (excluding the title bar, progress bar and page arrows), so the same page is never sent twice; going back to a translated page uses the cache (cleared when the browser closes). Translation starts about 1.2 seconds after the last page turn, so pages flipped past quickly are never sent. If you turn the page mid-translation, that page finishes in the background and goes into the cache (one page at most; beyond that the oldest is cancelled) while the new page starts right away; turning back to a page still translating in the background waits for it instead of sending it again.
+- A page is identified by a coarse fingerprint of its text area in the screenshot (excluding the title bar, progress bar and page arrows; shrunk to black and white and matched approximately, so the toolbar or hover effects don't count as a page turn), so the same page is never sent twice; going back to a translated page uses the cache (cleared when the browser closes). Translation starts about 1.2 seconds after the last page turn, so pages flipped past quickly are never sent. If you turn the page mid-translation, that page finishes in the background and goes into the cache (one page at most; beyond that the oldest is cancelled) while the new page starts right away; turning back to a page still translating in the background waits for it instead of sending it again.
 - The options page's 「翻譯方式」 (translation mode) has three choices:
   - **1. Fast (default)**: Tesseract.js reads the text and its position in the browser (a two-page spread is first split into columns at the blank gutter), lines are grouped into paragraphs, and only the text is sent to Claude Haiku 5.5. On a two-page spread both columns are sent in parallel. About 9 seconds per page (OCR about 3) and about 0.1 US cent; the screenshot never leaves your computer. Only the English OCR model is bundled for now.
   - **2. Polished**: as 1, then Sonnet 5.5 reviews Haiku's translation, returning only the paragraphs it changes; the changes are listed in the side panel's log. In testing the review took 2–3 seconds per column, about 10 seconds for the page, at about 1 cent per page.
@@ -43,6 +43,12 @@ The extension's interface is in Chinese; the labels quoted below are followed by
 
 ## Release notes
 
+- **0.6.2**: fixed the translation often flipping back to English, sometimes for good.
+  - Pages are recognized by a coarse fingerprint matched approximately, so the toolbar, hover effects and JPEG noise no longer count as a page turn.
+  - After hiding the overlay, the screenshot waits for the page to actually repaint, so OCR no longer reads leftover translation as garbage.
+  - The first page-turn message after Chrome stops the idle background worker is no longer dropped.
+  - Resize events fired by the toolbar no longer hide the overlay; after reloading the extension, the old page scripts no longer interfere.
+  - The log shows the difference percentage of each comparison, scrolls to the newest line, and is mirrored to the Kindle tab's console.
 - **0.6.1**
   - Turning the page mid-translation no longer cancels it: that page finishes in the background and is cached, so turning back shows it at once.
   - After reloading the extension, Kindle tabs already open reconnect without a refresh.
@@ -67,6 +73,7 @@ The extension's interface is in Chinese; the labels quoted below are followed by
 - `content.js`: detects page turns on the Kindle page (keys, clicks, DOM changes) and draws the translation overlay
 - `background.js`: capture, OCR preprocessing, Claude API calls (structured outputs), color sampling, cache
 - `ocr-layout.js`: column detection and grouping OCR lines into paragraphs
+- `page-sig.js`: page fingerprints and the "same page?" comparison
 - `offscreen.html/js`: runs Tesseract in an offscreen document (a service worker can't start a Web Worker)
 - `vendor/tesseract/`: Tesseract.js 7.0.0, tesseract.js-core and the English model (Apache-2.0), all bundled in the extension rather than loaded from a CDN
 - `sidepanel.html/js`: side panel UI

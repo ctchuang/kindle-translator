@@ -44,12 +44,12 @@ function addLog(text, at = Date.now(), isErr = false, image = null) {
     img.src = image;
     img.title = "點一下放大／縮小";
     img.onclick = () => img.classList.toggle("big");
+    img.onload = () => (logEl.scrollTop = logEl.scrollHeight); // it adds height once loaded
     line.append(img);
   }
-  const atBottom = logEl.scrollHeight - logEl.scrollTop - logEl.clientHeight < 20;
   logEl.append(line);
   while (logEl.childElementCount > MAX_LOG_LINES) logEl.firstElementChild.remove();
-  if (atBottom) logEl.scrollTop = logEl.scrollHeight;
+  logEl.scrollTop = logEl.scrollHeight; // always show the newest line
 }
 
 function addPage(text, cached, fallbackModel, summary) {
