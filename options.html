@@ -20,26 +20,22 @@
   <input id="apiKey" type="password" placeholder="sk-ant-..." autocomplete="off" />
   <div class="hint">到 console.anthropic.com 建立。key 只存在這台瀏覽器的 Chrome 同步儲存區，只會送往 api.anthropic.com。</div>
 
-  <label for="engine">辨識與翻譯方式</label>
-  <select id="engine">
-    <option value="ocr">本機 OCR（Tesseract）＋ Claude 翻譯文字（快）</option>
-    <option value="vision">Claude Opus 5.5 直接看截圖翻譯（慢，排版辨識較好）</option>
+  <label for="mode">翻譯方式</label>
+  <select id="mode">
+    <option value="haiku">1. 快速：本機辨識文字，Haiku 翻譯（約 9 秒，每頁約 0.1 美分）</option>
+    <option value="review">2. 精修：本機辨識文字，Haiku 翻譯後由 Sonnet 校對（約 10 秒，每頁約 1 美分）</option>
+    <option value="vision">3. 看圖：截圖直接交給 Opus 辨識並翻譯（20 秒以上，可處理非英文書）</option>
   </select>
-  <div class="hint">本機 OCR 只送文字給 Claude，不送截圖，目前只支援英文書。Opus 看截圖可以處理其他語言，但每頁要 20 秒以上，偶爾會以版權為由拒絕或只給摘要；實測 Sonnet 5.5、Haiku 5.5 看截圖會直接拒絕。</div>
+  <div class="hint">1、2 在瀏覽器裡用 Tesseract 辨識文字和位置，只把文字送給 Claude，截圖不會離開電腦，目前只支援英文書。某一欄被拒絕或只給摘要時，那一欄會自動改用 Opus 翻譯。2 的 Sonnet 只回傳需要修改的段落，校對失敗時沿用 Haiku 的譯文。<br />3 把截圖送給 Opus，排版辨識較好，也能處理其他語言，但比較慢，偶爾會以版權為由拒絕或只給摘要。<br />已翻過的頁面會用快取，改了設定後可按「重新翻譯本頁」。</div>
 
-  <label for="quality">翻譯認真程度（只用於本機 OCR 模式）</label>
-  <select id="quality">
-    <option value="haiku">1. Haiku 5.5 直接翻譯（最快最便宜，一頁約 0.1 美分）</option>
-    <option value="review">2. Haiku 5.5 翻譯，Sonnet 5.5 校對（多 2～3 秒，一頁約 1 美分）</option>
-  </select>
-  <div class="hint">某一欄被拒絕或只給摘要時，那一欄會自動改用 Opus 5.5（不再校對）。校對只回傳需要修改的段落，失敗時沿用 Haiku 的初稿。已翻過的頁面會用快取，改設定後可按「重新翻譯本頁」。</div>
-
-  <label for="effort">Opus 思考程度（effort，只用於截圖模式）</label>
-  <select id="effort">
-    <option value="low">low（最快，翻譯通常夠用）</option>
-    <option value="medium">medium</option>
-    <option value="high">high</option>
-  </select>
+  <div id="effortRow">
+    <label for="effort">Opus 思考程度（effort）</label>
+    <select id="effort">
+      <option value="low">low（最快，翻譯通常夠用）</option>
+      <option value="medium">medium</option>
+      <option value="high">high</option>
+    </select>
+  </div>
 
   <label for="targetLang">目標語言</label>
   <input id="targetLang" />
