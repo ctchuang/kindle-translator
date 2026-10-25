@@ -27,12 +27,12 @@
   </select>
   <div class="hint">本機 OCR 只送文字給 Claude，不送截圖，目前只支援英文書。Opus 看截圖可以處理其他語言，但每頁要 20 秒以上，偶爾會以版權為由拒絕或只給摘要；實測 Sonnet 5.5、Haiku 5.5 看截圖會直接拒絕。</div>
 
-  <label for="textModel">翻譯模型（只用於本機 OCR 模式）</label>
-  <select id="textModel">
-    <option value="claude-haiku-5-5">Claude Haiku 5.5（較快較便宜，一頁約 0.1 美分，較常拒絕）</option>
-    <option value="claude-sonnet-5-5">Claude Sonnet 5.5（譯文較好，一頁約 2 美分）</option>
+  <label for="quality">翻譯認真程度（只用於本機 OCR 模式）</label>
+  <select id="quality">
+    <option value="haiku">1. Haiku 5.5 直接翻譯（最快最便宜，一頁約 0.1 美分）</option>
+    <option value="review">2. Haiku 5.5 翻譯，Sonnet 5.5 校對（多 2～3 秒，一頁約 1 美分）</option>
   </select>
-  <div class="hint">某一欄被拒絕或只給摘要時，那一欄會自動改用 Opus 5.5。</div>
+  <div class="hint">某一欄被拒絕或只給摘要時，那一欄會自動改用 Opus 5.5（不再校對）。校對只回傳需要修改的段落，失敗時沿用 Haiku 的初稿。已翻過的頁面會用快取，改設定後可按「重新翻譯本頁」。</div>
 
   <label for="effort">Opus 思考程度（effort，只用於截圖模式）</label>
   <select id="effort">

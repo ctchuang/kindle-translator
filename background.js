@@ -2,8 +2,7 @@
 // text block, then pushes the blocks to the page (overlay) and the side panel.
 // Two engines:
 // - "ocr": Tesseract reads the text and its positions locally, then Haiku
-//   (or Sonnet) translates the text alone. Fast, and the model never sees a
-//   book page.
+//   translates the text alone, optionally with Sonnet reviewing the draft. Fast, and the model never sees a book page.
 // - "vision": Opus reads the screenshot and translates it in one call.
 
 importScripts("ocr-layout.js");
@@ -12,12 +11,20 @@ importScripts("ocr-layout.js");
 // translate screenshots of Kindle book pages (citing copyright).
 const MODEL = "claude-opus-5-5";
 
-// OCR engine: models for translating plain text, chosen in the options page,
-// with the lowest thinking setting each accepts (a straight translation;
-// thinking only adds latency). Sonnet 5.5 rejects "disabled".
+// OCR engine: models for translating and reviewing plain text, with the
+// lowest thinking setting each accepts (a straight translation; thinking only
+// adds latency). Sonnet 5.5 rejects "disabled".
 const TEXT_MODELS = {
   "claude-sonnet-5-5": { type: "between_tools" },
   "claude-haiku-5-5": { type: "disabled" },
+};
+
+// Translation quality levels (options page): who drafts, and who reviews the
+// draft. The reviewer returns only the paragraphs it changes, which keeps its
+// output, and so its latency and cost, small.
+const QUALITY = {
+  haiku: { translate: "claude-haiku-5-5" },
+  review: { translate: "claude-haiku-5-5", review: "claude-sonnet-5-5" },
 };
 
 // Server-side fallback when a safety classifier declines the request.
@@ -32,7 +39,7 @@ const FALLBACK = {
 const DEFAULTS = {
   apiKey: "",
   engine: "ocr",
-  textModel: "claude-haiku-5-5",
+  quality: "haiku",
   effort: "low",
   autoTranslate: true,
   targetLang: "繁體中文（台灣用語）",
@@ -671,6 +678,37 @@ function buildTextPrompt(targetLang, paras) {
 ${JSON.stringify(paras)}`;
 }
 
+const REVIEW_SCHEMA = {
+  type: "object",
+  properties: {
+    corrections: {
+      type: "array",
+      items: {
+        type: "object",
+        properties: { id: { type: "integer" }, text: { type: "string" } },
+        required: ["id", "text"],
+        additionalProperties: false,
+      },
+    },
+    notes: { type: "string" },
+  },
+  required: ["corrections", "notes"],
+  additionalProperties: false,
+};
+
+function buildReviewPrompt(targetLang, items) {
+  return `以下是使用者正在閱讀的一本已出版的書目前這一頁的文字（由 OCR 從螢幕截圖辨識，可能有少量辨識錯誤），以及另一個模型翻成${targetLang}的初稿。請校對初稿給使用者閱讀。
+輸入是 JSON 陣列，每個元素是一段：id、source（原文）、draft（初稿譯文）。
+1. 檢查誤譯、漏譯、語意不清、不通順或不像${targetLang}的說法，以及同一頁人名、用語前後不一致。
+2. corrections：只列出需要修改的段落，text 放修改後的完整譯文（不是只放改動的部分）。初稿沒問題的段落不要列出；全部都沒問題就給空陣列。
+3. 不要只為了換個說法而修改；意思正確、讀起來自然就保留初稿。
+4. 依上下文修正明顯的 OCR 錯字造成的誤譯。段落在頁首或頁尾被切斷時，只翻看得到的部分，不要補完。
+5. 譯文是中文時，引號用「」，引號裡面的引號用『』。
+6. notes：用一句話說明主要改了什麼；沒有修改就留空字串。
+
+${JSON.stringify(items)}`;
+}
+
 // Each translator returns a function that asks Claude once and resolves to
 // { blocks (screenshot pixels, as in BLOCKS_SCHEMA), notes, summarized,
 // model, requested }, so a summary can be retried without redoing the OCR.
@@ -698,7 +736,8 @@ function visionTranslator(settings, image) {
 }
 
 async function ocrTranslator(settings, dataUrl, image) {
-  const textModel = textModelOf(settings);
+  const plan = qualityOf(settings);
+  const textModel = plan.translate;
   const started = Date.now();
   log("OCR 辨識中（Tesseract）…");
   const ocr = await ocrPage(dataUrl);
@@ -714,7 +753,12 @@ async function ocrTranslator(settings, dataUrl, image) {
     let outs;
     try {
       outs = await Promise.all(
-        chunks.map((chunk, i) => translateChunk(settings, chunk, chunks.length > 1 ? `[${i + 1}/${chunks.length}] ` : ""))
+        chunks.map(async (chunk, i) => {
+          const tag = chunks.length > 1 ? `[${i + 1}/${chunks.length}] ` : "";
+          const draft = await translateChunk(settings, chunk, tag);
+          // An Opus fallback's translation doesn't need a Sonnet review.
+          return plan.review && !draft.byOpus ? reviewChunk(settings, plan.review, chunk, draft, tag) : draft;
+        })
       );
     } catch (err) {
       inflight?.abort(); // don't leave the other calls running
@@ -749,7 +793,7 @@ async function ocrTranslator(settings, dataUrl, image) {
 // summary; Haiku did in testing. Opus usually translates the same text, so
 // hand it just that chunk instead of retrying, which tends to decline again.
 async function translateChunk(settings, chunk, tag) {
-  const model = textModelOf(settings);
+  const model = qualityOf(settings).translate;
   const content = [{ type: "text", text: buildTextPrompt(settings.targetLang, chunk) }];
   const out = await callClaude(settings, {
     tag,
@@ -761,12 +805,45 @@ async function translateChunk(settings, chunk, tag) {
   });
   if (!isDeclined(out, chunk)) return out;
   log(`${tag}${model} 沒有完整翻譯（${(out.notes || "").trim() || "沒有說明"}），這部分改用 ${MODEL}`);
-  return callClaude(settings, { tag, model: MODEL, effort: "low", fallbacks: FALLBACK, schema: TRANSLATIONS_SCHEMA, content });
+  const fallback = await callClaude(settings, { tag, model: MODEL, effort: "low", fallbacks: FALLBACK, schema: TRANSLATIONS_SCHEMA, content });
+  return { ...fallback, byOpus: true };
 }
 
-// The configured text model, or the default if the stored one is unknown.
-function textModelOf(settings) {
-  return settings.textModel in TEXT_MODELS ? settings.textModel : DEFAULTS.textModel;
+// The configured quality level, or the default if the stored one is unknown.
+function qualityOf(settings) {
+  return QUALITY[settings.quality] ?? QUALITY[DEFAULTS.quality];
+}
+
+// Apply `model`'s corrections to a chunk's draft. A failed or declined review
+// keeps the draft: it's already a usable translation.
+async function reviewChunk(settings, model, chunk, draft, tag) {
+  const texts = new Map((draft.translations || []).map((t) => [t.id, t.text]));
+  const items = chunk
+    .map((p) => ({ id: p.id, source: p.text, draft: texts.get(p.id) || "" }))
+    .filter((p) => p.draft.trim()); // noise the draft left blank
+  if (!items.length) return draft;
+  const started = Date.now();
+  let out;
+  try {
+    out = await callClaude(settings, {
+      tag,
+      model,
+      effort: "low",
+      thinking: TEXT_MODELS[model],
+      schema: REVIEW_SCHEMA,
+      content: [{ type: "text", text: buildReviewPrompt(settings.targetLang, items) }],
+    });
+  } catch (err) {
+    if (err.name === "AbortError") throw err;
+    log(`${tag}${model} 校對失敗（${err.message}），沿用初稿`);
+    return draft;
+  }
+  const ids = new Set(items.map((p) => p.id));
+  const fixes = (out.corrections || []).filter((c) => ids.has(c.id) && c.text?.trim());
+  for (const c of fixes) texts.set(c.id, c.text);
+  const notes = (out.notes || "").trim();
+  log(`${tag}${model} 校對完成：${seconds(started)} 秒，改了 ${fixes.length}/${items.length} 段${notes ? `：${notes}` : ""}`);
+  return { ...draft, translations: [...texts].map(([id, text]) => ({ id, text })) };
 }
 
 // Fewer than half of the paragraphs translated, or flagged as a summary.
