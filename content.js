@@ -92,6 +92,9 @@ function isToggle(node) {
 
 function ensureToggle() {
   if (toggle) return toggle;
+  // Reloading the extension orphans the old script but leaves its button,
+  // stuck on one label, under the new one.
+  document.getElementById("kindle-translator-toggle")?.remove();
   toggle = document.createElement("button");
   toggle.id = "kindle-translator-toggle";
   Object.assign(toggle.style, {
@@ -135,6 +138,7 @@ function onTurnHint() {
 
 function ensureRoot() {
   if (root) return root;
+  document.getElementById("kindle-translator-overlay")?.remove(); // left by a script orphaned by a reload
   root = document.createElement("div");
   root.id = "kindle-translator-overlay";
   Object.assign(root.style, {
