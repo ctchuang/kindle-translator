@@ -96,15 +96,15 @@ function ensureToggle() {
   toggle.id = "kindle-translator-toggle";
   Object.assign(toggle.style, {
     position: "fixed",
-    right: "12px",
-    bottom: "10px",
+    right: "16px",
+    bottom: "8px", // ~32px tall: stays below the OCR crop (bottom 6%) in a 540px+ tall window
     zIndex: "2147483647",
-    padding: "3px 10px",
-    border: "1px solid rgba(128,128,128,.5)",
+    padding: "6px 16px",
+    border: "1px solid rgba(128,128,128,.6)",
     borderRadius: "999px",
-    background: "rgba(128,128,128,.18)",
+    background: "rgba(128,128,128,.22)",
     color: "inherit",
-    font: '12px "PingFang TC","Noto Sans TC","Microsoft JhengHei",sans-serif',
+    font: '600 15px/1.2 "PingFang TC","Noto Sans TC","Microsoft JhengHei",sans-serif',
     cursor: "pointer",
     opacity: "0.75",
   });
