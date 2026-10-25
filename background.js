@@ -839,10 +839,13 @@ async function reviewChunk(settings, model, chunk, draft, tag) {
     return draft;
   }
   const ids = new Set(items.map((p) => p.id));
-  const fixes = (out.corrections || []).filter((c) => ids.has(c.id) && c.text?.trim());
-  for (const c of fixes) texts.set(c.id, c.text);
+  const fixes = (out.corrections || []).filter((c) => ids.has(c.id) && c.text?.trim() && c.text !== texts.get(c.id));
   const notes = (out.notes || "").trim();
   log(`${tag}${model} 校對完成：${seconds(started)} 秒，改了 ${fixes.length}/${items.length} 段${notes ? `：${notes}` : ""}`);
+  for (const c of fixes) {
+    log(`${tag}校對第 ${c.id + 1} 段\n  初稿：${texts.get(c.id)}\n  改為：${c.text}`);
+    texts.set(c.id, c.text);
+  }
   return { ...draft, translations: [...texts].map(([id, text]) => ({ id, text })) };
 }
 
