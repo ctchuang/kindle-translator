@@ -22,6 +22,9 @@
     .seg button[aria-checked="true"] { background:var(--accent); color:#fff; }
     #overlayHint { width:100%; margin-top:-4px; color:var(--muted); font-size:12px; }
     #overlayHint[hidden] { display:none; }
+    #layoutState { width:100%; font-size:12px; color:var(--muted); }
+    #layoutState.ok { color:var(--accent); }
+    #layoutState.err { color:var(--err); }
     #status { width:100%; color:var(--muted); font-size:12px; min-height:1em; white-space:pre-wrap; }
     #status.err { color:var(--err); }
     /* While translating: a tinted pill with a pulsing dot, so it's visible at a glance. */
@@ -52,6 +55,7 @@
       <button role="radio" data-on="false">原文</button>
     </div>
     <div id="overlayHint">本頁尚未翻譯，翻好後選「譯文」才會蓋上去</div>
+    <div id="layoutState" title="判斷段落、標題、圖、表位置的 DocLayout-YOLO 模型；Tesseract 只負責讀出文字">DocLayout-YOLO：翻譯第一頁時載入</div>
     <button class="ghost" id="clear">清空</button>
     <button class="ghost" id="options">設定</button>
     <div id="status"></div>

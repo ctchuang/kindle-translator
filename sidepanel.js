@@ -84,6 +84,11 @@ function onMessage(msg) {
     translateBtn.textContent = msg.retranslate ? "重新翻譯本頁" : "翻譯這一頁";
     document.getElementById("overlayHint").hidden = msg.retranslate;
   }
+  if (msg.type === "layoutState") {
+    const el = document.getElementById("layoutState");
+    el.textContent = msg.text;
+    el.className = msg.level;
+  }
   if (msg.type === "idle" && ticker) setStatus("");
   if (msg.type === "result") {
     setStatus("");

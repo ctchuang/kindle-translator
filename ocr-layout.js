@@ -177,6 +177,98 @@ function joinLines(parts) {
   }, "");
 }
 
+// ---- Layout model (DocLayout-YOLO, see vendor/doclayout) ----
+
+const LAYOUT_CLASSES = [
+  "title",
+  "plain text",
+  "abandon",
+  "figure",
+  "figure_caption",
+  "table",
+  "table_caption",
+  "table_footnote",
+  "isolate_formula",
+  "formula_caption",
+];
+// Regions whose text stays as it is on the page: translating labels inside a
+// figure or a formula only covers it with jumbled text.
+const KEEP_ORIGINAL = new Set(["figure", "table", "isolate_formula"]);
+const LAYOUT_MIN_CONF = 0.25;
+
+// Regions from the model's output rows (x0, y0, x1, y1, confidence, class
+// in model input pixels), mapped to image pixels by `toImage(x, y)`, with
+// near-duplicates removed (the model sometimes boxes one block twice, once
+// per class).
+function layoutRegions(data, rows, toImage) {
+  const found = [];
+  for (let i = 0; i < rows; i++) {
+    const [x0, y0, x1, y1, conf, cls] = data.slice(i * 6, i * 6 + 6);
+    if (conf < LAYOUT_MIN_CONF) continue;
+    const [ix0, iy0] = toImage(x0, y0);
+    const [ix1, iy1] = toImage(x1, y1);
+    found.push({ cls: LAYOUT_CLASSES[cls] ?? String(cls), conf, x0: ix0, y0: iy0, x1: ix1, y1: iy1 });
+  }
+  found.sort((a, b) => b.conf - a.conf);
+  const kept = [];
+  for (const r of found) if (!kept.some((k) => iou(k, r) > 0.6)) kept.push(r);
+  return kept;
+}
+
+function iou(a, b) {
+  const inter = overlapArea(a, b);
+  return inter / (area(a) + area(b) - inter || 1);
+}
+
+function overlapArea(a, b) {
+  return Math.max(0, Math.min(a.x1, b.x1) - Math.max(a.x0, b.x0)) * Math.max(0, Math.min(a.y1, b.y1) - Math.max(a.y0, b.y0));
+}
+
+function area(r) {
+  return Math.max(0, r.x1 - r.x0) * Math.max(0, r.y1 - r.y0);
+}
+
+// Like groupParagraphs, but with the layout model's regions for one column:
+// lines inside a figure, table or formula are left out, lines inside a text
+// region (paragraph, heading, caption…) form one block per region, and any
+// line no region covers falls back to the heuristics.
+function groupWithLayout(lines, regions) {
+  lines = lines.filter(isText);
+  if (!lines.length) return [];
+  const lineH = median(lines.map((l) => l.y1 - l.y0));
+  // Figure boxes sometimes clip the edge of a label; give them some slack.
+  const pad = lineH * 0.5;
+  const keep = regions.filter((r) => KEEP_ORIGINAL.has(r.cls)).map((r) => ({ x0: r.x0 - pad, y0: r.y0 - pad, x1: r.x1 + pad, y1: r.y1 + pad }));
+  const text = regions.filter((r) => !KEEP_ORIGINAL.has(r.cls));
+  const members = new Map(text.map((r) => [r, []]));
+  const leftover = [];
+  for (const l of lines) {
+    const covered = (r) => overlapArea(l, r) / (area(l) || 1);
+    if (keep.some((r) => covered(r) > 0.5)) continue;
+    let best = null;
+    for (const r of text) if (covered(r) > 0.5 && (!best || covered(r) > covered(best))) best = r;
+    if (best) members.get(best).push(l);
+    else leftover.push(l);
+  }
+  const blocks = [];
+  for (const [r, items] of members) {
+    if (!items.length) continue;
+    items.sort((a, b) => a.y0 - b.y0);
+    blocks.push({
+      kind: r.cls === "title" || r.cls === "abandon" ? "heading" : "paragraph",
+      x0: Math.min(...items.map((l) => l.x0)),
+      y0: Math.min(...items.map((l) => l.y0)),
+      x1: Math.max(...items.map((l) => l.x1)),
+      y1: Math.max(...items.map((l) => l.y1)),
+      lines: items.length,
+      text: joinLines(items.map((l) => l.text.trim())),
+      region: r.cls,
+    });
+  }
+  blocks.push(...groupParagraphs(leftover));
+  return blocks.sort((a, b) => a.y0 - b.y0);
+}
+
 function median(xs) {
   const s = [...xs].sort((a, b) => a - b);
   return s[s.length >> 1];
@@ -187,4 +279,4 @@ function percentile(xs, q) {
   return s[Math.min(s.length - 1, Math.floor(s.length * q))];
 }
 
-if (typeof module !== "undefined") module.exports = { findColumns, groupParagraphs };
+if (typeof module !== "undefined") module.exports = { findColumns, groupParagraphs, groupWithLayout, layoutRegions, LAYOUT_CLASSES };

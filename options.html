@@ -26,7 +26,7 @@
     <option value="review">2. 精修：本機辨識文字，Haiku 翻譯後由 Sonnet 校對（約 10 秒，每頁約 1 美分）</option>
     <option value="vision">3. 看圖：截圖直接交給 Opus 辨識並翻譯（20 秒以上，可處理非英文書）</option>
   </select>
-  <div class="hint">1、2 在瀏覽器裡用 Tesseract 辨識文字和位置，只把文字送給 Claude，截圖不會離開電腦，目前只支援英文書。某一欄被拒絕或只給摘要時，那一欄會自動改用 Opus 翻譯。2 的 Sonnet 只回傳需要修改的段落，校對失敗時沿用 Haiku 的譯文。<br />3 把截圖送給 Opus，排版辨識較好，也能處理其他語言，但比較慢，偶爾會以版權為由拒絕或只給摘要。<br />已翻過的頁面會用快取，改了設定後可按「重新翻譯本頁」。</div>
+  <div class="hint">1、2 在瀏覽器裡用 Tesseract 辨識文字、用 DocLayout-YOLO（WebGPU）找段落和圖表位置，只把文字送給 Claude，截圖不會離開電腦，目前只支援英文書。某一欄被拒絕或只給摘要時，那一欄會自動改用 Opus 翻譯。2 的 Sonnet 只回傳需要修改的段落，校對失敗時沿用 Haiku 的譯文。<br />3 把截圖送給 Opus，排版辨識較好，也能處理其他語言，但比較慢，偶爾會以版權為由拒絕或只給摘要。<br />已翻過的頁面會用快取，改了設定後可按「重新翻譯本頁」。</div>
 
   <div id="effortRow">
     <label for="effort">Opus 思考程度（effort）</label>

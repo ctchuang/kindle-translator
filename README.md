@@ -6,7 +6,7 @@
 
 ![範例：《Build a Reasoning Model (From Scratch)》雙頁版面，內文和圖說的譯文蓋在原文位置上，圖 1.1、1.2 保留原圖，右側是側邊欄](docs/example.png)
 
-> **狀態：原型，日常閱讀可用（目前版本 0.6.3）。** 在 Kindle Cloud Reader 的雙頁版面上實測，翻頁後約 10 秒譯文就會蓋上原文。段落偶爾會切錯，框也偶爾會偏一點。覆蓋層沒出現時，側邊欄狀態列會用紅字顯示原因，底下的執行紀錄可以看到每一步。
+> **狀態：原型，日常閱讀可用（目前版本 1.0.0）。** 在 Kindle Cloud Reader 的雙頁版面上實測，翻頁後約 10 秒譯文就會蓋上原文。段落偶爾會切錯，框也偶爾會偏一點。覆蓋層沒出現時，側邊欄狀態列會用紅字顯示原因，底下的執行紀錄可以看到每一步。
 
 ## 安裝
 
@@ -28,19 +28,21 @@
 - 只有側邊欄開著時才會自動翻譯，避免背景偷偷花費 API 額度。
 - 頁面以「內文區域」的粗略指紋辨識（不含標題列、進度列、翻頁箭頭；縮小成黑白點陣，大致相同就算同一頁，所以工具列、滑鼠效果不會被當成換頁），同一頁不會重複送出；翻回已翻過的頁面會用快取（關掉瀏覽器後清除）。翻頁後停約 1.2 秒才會開始翻譯，快速連續翻頁時中間的頁面不會送出。翻譯途中換頁的話，那一頁會在背景翻完並存進快取（最多同時一頁，再多就取消最早的），同時馬上開始翻新的一頁；翻回還在背景翻譯的頁面時會等它完成，不會重送。
 - 設定頁的「翻譯方式」有三種：
-  - **1. 快速**：Tesseract.js 在瀏覽器裡辨識文字和位置（雙頁會先找出中間的空白分成兩欄），合併成段落後只把文字送給 Claude Haiku 5.5 翻譯；雙頁時左右兩欄同時送出。一頁約 9 秒（OCR 約 3 秒），每頁約 0.1 美分，截圖不會離開電腦。目前只載入英文辨識模型。
+  - **1. 快速**：Tesseract.js 在瀏覽器裡辨識文字和位置（雙頁會先找出中間的空白分成兩欄），同時用 DocLayout-YOLO 版面模型在 GPU 上（WebGPU）找出段落、標題、圖說、圖、表的位置：圖、表、公式裡的文字保留原文，其他依模型的區塊合併成段落，只把文字送給 Claude Haiku 5.5 翻譯；雙頁時左右兩欄同時送出。一頁約 9 秒（OCR 約 3 秒），每頁約 0.1 美分，截圖不會離開電腦。目前只載入英文辨識模型。
   - **2. 精修（預設）**：同 1，Haiku 翻完後再由 Sonnet 5.5 校對，Sonnet 只回傳需要修改的段落，修改內容會列在側邊欄的執行紀錄裡。實測每欄校對 2～3 秒，整頁約 10 秒，每頁約 1 美分。
   - 1、2 偶爾會有某一欄被以版權為由拒絕翻譯，那一欄會自動改用 Opus 5.5 翻譯文字（不再校對），整頁約 15 秒。
   - **3. 看圖**：截圖直接送給 Claude Opus 5.5，由它找段落位置並翻譯，可以處理非英文書。每頁 20 秒以上，effort 預設 low。實測 Sonnet 5.5、Haiku 5.5 看書頁截圖會以版權為由拒絕，所以這個模式只用 Opus。Opus 5.5 被安全分類器擋下時，會依序改用 Opus 5、Opus 4.8 重試。
 - 只會連到 api.anthropic.com。API key 存在 Chrome 同步儲存區。
 - Opus 模式的截圖會先縮到長邊 2576px 且總像素 3.7MP 以內再送出，超過的話 API 會再縮一次，座標就對不上。
 - Claude 偶爾會以版權為由只給摘要。偵測到摘要會自動重新請求一次；仍是摘要就照樣顯示並標示「摘要」，但不存快取。
-- 位置以段落為單位，不是逐行對齊；框偶爾會偏一點。OCR 模式的段落是依縮排、行距和短行切分，偶爾會把兩段合併或一段拆開。
+- 位置以段落為單位，不是逐行對齊；框偶爾會偏一點。OCR 模式的段落以 DocLayout-YOLO 的區塊為準，模型沒框到的行（例如被頁緣切到的一行）才依縮排、行距和短行切分。
+- DocLayout-YOLO 模型檔 75 MB，第一次翻譯時從 Hugging Face 下載並校驗，存在瀏覽器裡，之後不再下載；第一頁會等下載完成，側邊欄會顯示進度。需要 WebGPU；模型無法使用時不會改用別的方式，而是在側邊欄顯示紅字錯誤，這頁不翻譯。
 - 書頁文字太小時辨識會變差，可以把閱讀器字體調大或視窗放大。
 - 這是逐頁截圖翻譯給自己閱讀用，不要拿來大量匯出書本內容，那會違反 Amazon 使用條款。
 
 ## 版本紀錄
 
+- **1.0.0**：用 DocLayout-YOLO 版面模型（WebGPU）判斷段落、標題、圖說、圖、表，取代原本靠縮排、行距、字距猜的規則；圖、表、公式裡的文字保留原文。模型第一次使用時下載（75 MB）並存在瀏覽器裡；無法使用時明確報錯，不改用別的方式。側邊欄新增模型狀態列。
 - **0.6.3**：翻譯方式預設改成「2. 精修」（Haiku 翻譯、Sonnet 校對）。
 - **0.6.2**：修正譯文常常變回英文、停在英文不回來。
   - 判斷是否同一頁改用粗略指紋（大致相同就算同一頁），工具列、滑鼠效果、JPEG 雜訊不再被當成換頁。
@@ -73,7 +75,16 @@
 - `background.js`：截圖、OCR 前處理、呼叫 Claude API（結構化輸出）、取樣顏色、快取
 - `ocr-layout.js`：分欄偵測、把 OCR 的行合併成段落
 - `page-sig.js`：頁面指紋與「是否同一頁」的比對
-- `offscreen.html/js`：在 offscreen 文件裡執行 Tesseract（service worker 不能開 Web Worker）
+- `offscreen.html/js`：在 offscreen 文件裡執行 Tesseract 和 DocLayout-YOLO（service worker 不能開 Web Worker）
+- `layout-model.js`：下載、快取、在 WebGPU 上執行 DocLayout-YOLO
 - `vendor/tesseract/`：Tesseract.js 7.0.0、tesseract.js-core 和英文模型（Apache-2.0），全部打包在擴充功能裡，不從 CDN 載入
+- `vendor/onnxruntime/`：ONNX Runtime Web 1.30.0 的 WebGPU 版本（MIT）
+- `vendor/doclayout/`：DocLayout-YOLO 模型的來源、校驗碼與授權（Apache-2.0）；模型本身不在 repo 裡
+
+## 致謝
+
+- [DocLayout-YOLO](https://github.com/opendatalab/DocLayout-YOLO)（OpenDataLab）：版面偵測模型。使用 [wybxc/DocLayout-YOLO-DocStructBench-onnx](https://huggingface.co/wybxc/DocLayout-YOLO-DocStructBench-onnx) 的 ONNX 版本（Apache-2.0）。
+- [BabelDOC](https://github.com/funstory-ai/BabelDOC)：模型的選擇、前處理與類別定義參考它的做法。
+- [ONNX Runtime Web](https://github.com/microsoft/onnxruntime)（MIT）與 [Tesseract.js](https://github.com/naptha/tesseract.js)（Apache-2.0）。
 - `sidepanel.html/js`：側邊欄介面
 - `options.html/js`：設定頁（API key、翻譯方式、effort、目標語言）

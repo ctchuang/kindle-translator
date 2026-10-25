@@ -169,6 +169,7 @@ chrome.runtime.onConnect.addListener((port) => {
   panelPorts.add(port);
   port.onDisconnect.addListener(() => panelPorts.delete(port));
   for (const msg of unsent.splice(0)) port.postMessage(msg);
+  if (lastLayoutState) port.postMessage(lastLayoutState);
   // Button label and "not translated yet" hint for a freshly opened panel.
   getShownSig().then((sig) => port.postMessage({ type: "pageState", retranslate: !!sig })).catch(() => {});
   port.onMessage.addListener((msg) => {
@@ -918,9 +919,11 @@ async function ocrTranslator(settings, dataUrl, image, jobSignal) {
   const plan = qualityOf(settings);
   const textModel = plan.translate;
   const started = Date.now();
-  log("OCR 辨識中（Tesseract）…");
+  log("OCR 辨識中（Tesseract 讀文字，DocLayout-YOLO 找段落和圖表）…");
   const ocr = await ocrPage(dataUrl);
   log(`OCR 完成：${seconds(started)} 秒，${ocr.size}，${ocr.columns} 欄，${ocr.blocks.length} 段`);
+  log(ocr.layout.text);
+  setLayoutState(ocr.layout);
   if (ocr.blocks.length) log(`OCR 文字：${ocr.blocks.map((b) => b.text).join(" ¶ ").slice(0, 400)}`);
   const paras = ocr.blocks.map((b, id) => ({ id, text: b.text }));
   const chunks = splitParas(paras, ocr.blocks);
@@ -1078,14 +1081,47 @@ async function ocrPage(dataUrl) {
     image: `data:image/png;base64,${bytesToBase64(new Uint8Array(await png.arrayBuffer()))}`,
     rects: columns.map(([x0, x1]) => ({ left: x0, top: 0, width: x1 - x0, height: h })),
   });
+  if (res?.error?.startsWith("DocLayout-YOLO")) {
+    setLayoutState({ level: "err", text: res.error });
+    throw new Error(res.error);
+  }
   if (!res || res.error) throw new Error(`OCR 失敗：${res?.error || "offscreen 文件沒有回應"}`);
   const fx = (x) => (sx + x / scale) / bitmap.width;
   const fy = (y) => (sy + y / scale) / bitmap.height;
+  const { regions } = res.layout;
   const blocks = res.columns.flatMap((lines, column) =>
-    groupParagraphs(lines).map((b) => ({ ...b, column, box: [fx(b.x0), fy(b.y0), fx(b.x1), fy(b.y1)] }))
+    groupWithLayout(lines, regions[column]).map((b) => ({
+      ...b,
+      column,
+      box: [fx(b.x0), fy(b.y0), fx(b.x1), fy(b.y1)],
+    }))
   );
-  return { blocks, columns: columns.length, size: `${w}×${h}` };
+  return { blocks, columns: columns.length, size: `${w}×${h}`, layout: describeLayout(res.layout) };
 }
+
+// What the layout model did for this page, for the log and the side panel's
+// status line: { text, level: "ok" | "wait" | "err" }.
+function describeLayout({ regions, ms }) {
+  const all = regions.flat();
+  const count = (cls) => all.filter((r) => r.cls === cls).length;
+  const kept = count("figure") + count("table") + count("isolate_formula");
+  return { level: "ok", text: `DocLayout-YOLO（WebGPU）：${all.length} 個區塊，${kept} 個圖、表或公式保留原文，${ms} 毫秒` };
+}
+
+let lastLayoutState = null; // shown to a side panel that opens later
+
+function setLayoutState(state) {
+  lastLayoutState = { type: "layoutState", ...state };
+  broadcast(lastLayoutState);
+}
+
+// The first page waits for the model download; show how far along it is.
+chrome.runtime.onMessage.addListener((msg) => {
+  if (msg.type !== "layoutProgress") return;
+  const text = `DocLayout-YOLO 下載中（${Math.round(msg.progress * 100)}%，75 MB，只需下載一次）`;
+  if (msg.progress === 0) log(text);
+  setLayoutState({ level: "wait", text });
+});
 
 let creatingOffscreen = null;
 
@@ -1093,7 +1129,7 @@ async function ensureOffscreen() {
   const open = await chrome.runtime.getContexts({ contextTypes: ["OFFSCREEN_DOCUMENT"] });
   if (open.length) return;
   creatingOffscreen ??= chrome.offscreen
-    .createDocument({ url: "offscreen.html", reasons: ["WORKERS"], justification: "Run Tesseract OCR in a Web Worker" })
+    .createDocument({ url: "offscreen.html", reasons: ["WORKERS"], justification: "Run Tesseract OCR in a Web Worker and the layout model on WebGPU" })
     .finally(() => (creatingOffscreen = null));
   await creatingOffscreen;
 }

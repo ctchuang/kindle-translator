@@ -6,7 +6,7 @@ Captures the page currently shown in Kindle Cloud Reader (read.amazon.com and ot
 
 ![Example: a two-page spread of Build a Reasoning Model (From Scratch), with the body text and captions translated in place and figures 1.1 and 1.2 left as they are, and the side panel on the right](docs/example.png)
 
-> **Status: prototype, usable for everyday reading (current version 0.6.3).** Tested on Kindle Cloud Reader's two-page layout: the translation covers the original text about 10 seconds after a page turn. Paragraphs are occasionally split wrongly, and boxes are occasionally a little off. When the overlay doesn't appear, the side panel's status line shows the reason in red, and the log below it shows each step.
+> **Status: prototype, usable for everyday reading (current version 1.0.0).** Tested on Kindle Cloud Reader's two-page layout: the translation covers the original text about 10 seconds after a page turn. Paragraphs are occasionally split wrongly, and boxes are occasionally a little off. When the overlay doesn't appear, the side panel's status line shows the reason in red, and the log below it shows each step.
 
 The extension's interface is in Chinese; the labels quoted below are followed by their English meaning. The target language can be changed in the options page.
 
@@ -30,19 +30,21 @@ The extension's interface is in Chinese; the labels quoted below are followed by
 - Pages are only translated automatically while the side panel is open, so no API credit is spent in the background.
 - A page is identified by a coarse fingerprint of its text area in the screenshot (excluding the title bar, progress bar and page arrows; shrunk to black and white and matched approximately, so the toolbar or hover effects don't count as a page turn), so the same page is never sent twice; going back to a translated page uses the cache (cleared when the browser closes). Translation starts about 1.2 seconds after the last page turn, so pages flipped past quickly are never sent. If you turn the page mid-translation, that page finishes in the background and goes into the cache (one page at most; beyond that the oldest is cancelled) while the new page starts right away; turning back to a page still translating in the background waits for it instead of sending it again.
 - The options page's 「翻譯方式」 (translation mode) has three choices:
-  - **1. Fast**: Tesseract.js reads the text and its position in the browser (a two-page spread is first split into columns at the blank gutter), lines are grouped into paragraphs, and only the text is sent to Claude Haiku 5.5. On a two-page spread both columns are sent in parallel. About 9 seconds per page (OCR about 3) and about 0.1 US cent; the screenshot never leaves your computer. Only the English OCR model is bundled for now.
+  - **1. Fast**: Tesseract.js reads the text and its position in the browser (a two-page spread is first split into columns at the blank gutter), while the DocLayout-YOLO layout model finds paragraphs, headings, captions, figures and tables on the GPU (WebGPU): text inside figures, tables and formulas stays in the original, the rest is grouped into paragraphs by the model's blocks, and only the text is sent to Claude Haiku 5.5. On a two-page spread both columns are sent in parallel. About 9 seconds per page (OCR about 3) and about 0.1 US cent; the screenshot never leaves your computer. Only the English OCR model is bundled for now.
   - **2. Polished (default)**: as 1, then Sonnet 5.5 reviews Haiku's translation, returning only the paragraphs it changes; the changes are listed in the side panel's log. In testing the review took 2–3 seconds per column, about 10 seconds for the page, at about 1 cent per page.
   - In 1 and 2 a column is occasionally declined on copyright grounds; that column is then translated as text by Opus 5.5 instead (without a review), about 15 seconds for the page.
   - **3. Read the image**: the screenshot goes straight to Claude Opus 5.5, which finds the paragraphs and translates them, and can handle books in other languages. 20+ seconds per page, effort defaults to low. In testing, Sonnet 5.5 and Haiku 5.5 declined book-page screenshots on copyright grounds, so this mode uses Opus only. When a safety classifier declines Opus 5.5, the request is retried on Opus 5, then Opus 4.8.
 - The only server contacted is api.anthropic.com. The API key is kept in Chrome sync storage.
 - In Opus mode the screenshot is scaled to at most 2576 px on the long edge and 3.7 MP in total before sending; anything larger gets scaled again by the API and the coordinates no longer line up.
 - Claude occasionally returns a summary instead of a translation, citing copyright. A summary triggers one automatic retry; if it is still a summary it is shown and labelled 「摘要」 (summary), but not cached.
-- Positions are per paragraph, not per line, and boxes are occasionally a little off. In OCR mode paragraphs are split by indentation, line spacing and short lines, which occasionally merges two paragraphs or splits one.
+- Positions are per paragraph, not per line, and boxes are occasionally a little off. In OCR mode paragraphs follow DocLayout-YOLO's blocks; only lines the model doesn't cover (such as a line cut off at the page edge) are split by indentation, line spacing and short lines.
+- The DocLayout-YOLO model file is 75 MB. It's downloaded from Hugging Face on the first translation, verified, and kept in the browser; the first page waits for the download, with progress in the side panel. WebGPU is required. If the model can't run there is no fallback: the side panel shows the error in red and the page isn't translated.
 - Recognition gets worse when the book text is small; enlarge the reader font or the window.
 - This translates page by page for your own reading. Don't use it to export book content in bulk; that violates Amazon's terms of use.
 
 ## Release notes
 
+- **1.0.0**: the DocLayout-YOLO layout model (WebGPU) now finds paragraphs, headings, captions, figures and tables, replacing the guesswork from indentation, line spacing and word gaps; text inside figures, tables and formulas stays in the original. The model is downloaded on first use (75 MB) and kept in the browser; if it can't run, the extension reports an error instead of falling back. The side panel shows the model's status.
 - **0.6.3**: the default translation mode is now 2. Polished (Haiku translates, Sonnet reviews).
 - **0.6.2**: fixed the translation often flipping back to English, sometimes for good.
   - Pages are recognized by a coarse fingerprint matched approximately, so the toolbar, hover effects and JPEG noise no longer count as a page turn.
@@ -75,7 +77,16 @@ The extension's interface is in Chinese; the labels quoted below are followed by
 - `background.js`: capture, OCR preprocessing, Claude API calls (structured outputs), color sampling, cache
 - `ocr-layout.js`: column detection and grouping OCR lines into paragraphs
 - `page-sig.js`: page fingerprints and the "same page?" comparison
-- `offscreen.html/js`: runs Tesseract in an offscreen document (a service worker can't start a Web Worker)
+- `offscreen.html/js`: runs Tesseract and DocLayout-YOLO in an offscreen document (a service worker can't start a Web Worker)
+- `layout-model.js`: downloads, caches and runs DocLayout-YOLO on WebGPU
 - `vendor/tesseract/`: Tesseract.js 7.0.0, tesseract.js-core and the English model (Apache-2.0), all bundled in the extension rather than loaded from a CDN
+- `vendor/onnxruntime/`: the WebGPU build of ONNX Runtime Web 1.30.0 (MIT)
+- `vendor/doclayout/`: source, checksum and license (Apache-2.0) of the DocLayout-YOLO model; the model itself isn't in the repo
+
+## Credits
+
+- [DocLayout-YOLO](https://github.com/opendatalab/DocLayout-YOLO) (OpenDataLab): the layout detection model, used through the ONNX export [wybxc/DocLayout-YOLO-DocStructBench-onnx](https://huggingface.co/wybxc/DocLayout-YOLO-DocStructBench-onnx) (Apache-2.0).
+- [BabelDOC](https://github.com/funstory-ai/BabelDOC): the choice of model, its preprocessing and class list follow BabelDOC.
+- [ONNX Runtime Web](https://github.com/microsoft/onnxruntime) (MIT) and [Tesseract.js](https://github.com/naptha/tesseract.js) (Apache-2.0).
 - `sidepanel.html/js`: side panel UI
 - `options.html/js`: options page (API key, translation mode, effort, target language)
