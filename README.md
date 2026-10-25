@@ -29,10 +29,11 @@ Kindle Cloud Reader 的書頁是圖片，沒有可以讀的文字和排版資訊
 
 ## 安裝
 
-1. 解壓縮 `kindle-translate.zip`，得到 `kindle-translate` 資料夾。
-2. Chrome 網址列輸入 `chrome://extensions`，打開右上角「開發人員模式」。
-3. 按「載入未封裝項目」，選 `kindle-translate` 資料夾。
-4. 在擴充功能的「詳細資料 → 擴充功能選項」填入 Anthropic API key（console.anthropic.com 建立），按儲存。
+1. 從 [Releases](https://github.com/ctchuang/kindle-translator/releases/latest) 下載 `kindle-translate.zip`。
+2. 解壓縮 `kindle-translate.zip`，得到 `kindle-translate` 資料夾。
+3. Chrome 網址列輸入 `chrome://extensions`，打開右上角「開發人員模式」。
+4. 按「載入未封裝項目」，選 `kindle-translate` 資料夾。
+5. 在擴充功能的「詳細資料 → 擴充功能選項」填入 Anthropic API key（console.anthropic.com 建立），按儲存。
 
 ## 使用
 

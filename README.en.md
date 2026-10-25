@@ -31,10 +31,11 @@ The model runs on your GPU through [ONNX Runtime Web](https://github.com/microso
 
 ## Install
 
-1. Unzip `kindle-translate.zip` to get the `kindle-translate` folder.
-2. Open `chrome://extensions` and turn on "Developer mode" in the top right.
-3. Click "Load unpacked" and choose the `kindle-translate` folder.
-4. In the extension's "Details → Extension options", enter an Anthropic API key (create one at console.anthropic.com) and save.
+1. Download `kindle-translate.zip` from [Releases](https://github.com/ctchuang/kindle-translator/releases/latest).
+2. Unzip `kindle-translate.zip` to get the `kindle-translate` folder.
+3. Open `chrome://extensions` and turn on "Developer mode" in the top right.
+4. Click "Load unpacked" and choose the `kindle-translate` folder.
+5. In the extension's "Details → Extension options", enter an Anthropic API key (create one at console.anthropic.com) and save.
 
 ## Usage
 
