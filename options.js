@@ -1,7 +1,7 @@
 const FIELDS = { apiKey: "", effort: "low", targetLang: "繁體中文（台灣用語）" };
 // The page's one "translation mode" select maps onto two stored settings the
 // background reads: engine ("ocr" | "vision") and the OCR quality level.
-const MODE_SETTINGS = { engine: "ocr", quality: "haiku" };
+const MODE_SETTINGS = { engine: "ocr", quality: "review" };
 
 const mode = document.getElementById("mode");
 const showEffort = () => (document.getElementById("effortRow").hidden = mode.value !== "vision");

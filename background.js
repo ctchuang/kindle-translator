@@ -39,7 +39,7 @@ const FALLBACK = {
 const DEFAULTS = {
   apiKey: "",
   engine: "ocr",
-  quality: "haiku",
+  quality: "review",
   effort: "low",
   autoTranslate: true,
   targetLang: "繁體中文（台灣用語）",
