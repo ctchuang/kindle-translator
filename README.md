@@ -4,7 +4,7 @@
 
 截取 Kindle Cloud Reader（read.amazon.com 等）目前顯示的頁面，用本機 OCR（Tesseract）辨識每段文字與位置，再交給 Claude Haiku 翻譯成繁體中文。譯文直接蓋在書頁原文的位置上，也同時顯示在 Chrome 側邊欄。
 
-![範例：Ender's Game 第 8 頁，左右兩頁的譯文蓋在原文位置上，右側是側邊欄](docs/example.png)
+![範例：《Build a Reasoning Model (From Scratch)》雙頁版面，內文和圖說的譯文蓋在原文位置上，圖 1.1、1.2 保留原圖，右側是側邊欄](docs/example.png)
 
 > **狀態：原型，日常閱讀可用（目前版本 0.6.0）。** 在 Kindle Cloud Reader 的雙頁版面上實測，翻頁後約 9 秒譯文就會蓋上原文。段落偶爾會切錯，框也偶爾會偏一點。覆蓋層沒出現時，側邊欄狀態列會用紅字顯示原因，底下的執行紀錄可以看到每一步。
 

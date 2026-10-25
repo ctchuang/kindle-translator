@@ -4,7 +4,7 @@
 
 Captures the page currently shown in Kindle Cloud Reader (read.amazon.com and others), reads each paragraph and its position with local OCR (Tesseract), and has Claude Haiku translate it into Traditional Chinese. The translation is drawn directly over the original text on the page, and also shown in Chrome's side panel.
 
-![Example: page 8 of Ender's Game, with the translation of both pages laid over the original text and the side panel on the right](docs/example.png)
+![Example: a two-page spread of Build a Reasoning Model (From Scratch), with the body text and captions translated in place and figures 1.1 and 1.2 left as they are, and the side panel on the right](docs/example.png)
 
 > **Status: prototype, usable for everyday reading (current version 0.6.0).** Tested on Kindle Cloud Reader's two-page layout: the translation covers the original text about 9 seconds after a page turn. Paragraphs are occasionally split wrongly, and boxes are occasionally a little off. When the overlay doesn't appear, the side panel's status line shows the reason in red, and the log below it shows each step.
 
