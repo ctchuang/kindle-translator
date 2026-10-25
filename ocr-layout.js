@@ -114,11 +114,12 @@ function groupParagraphs(lines) {
 // `prev` ends well short of the right margin, and not just because the next
 // word was too long for the rest of the line. `edge` is the paragraph's own
 // right edge so far: ragged-right text (captions, sidebars) ends every line
-// short of the column's margin.
+// short of the column's margin, and by an uneven amount, so the word must
+// fit with room to spare (a short "to" squeezing in proves nothing).
 function endedShort(prev, next, edge, right, lineH) {
   if (prev.x1 >= right - lineH * 2) return false;
   if (!next.firstWord) return true; // no word boxes: go by the margin alone
-  return prev.x1 + lineH * 0.3 + next.firstWord <= edge;
+  return prev.x1 + lineH * 0.3 + next.firstWord + lineH <= edge;
 }
 
 // Leave out figures: their labels and side-by-side notes come back from OCR

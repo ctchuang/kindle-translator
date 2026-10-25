@@ -71,10 +71,19 @@ const SUMMARY_RETRIES = 1;
 const READER_RE = /^https:\/\/read\.amazon\.(com|co\.jp|co\.uk|de|ca|com\.au)\//;
 
 let panelPorts = new Set();
-let busy = false;
-let pending = null; // { force } of a request waiting for the current one
-let inflight = null; // AbortController of the current translation (OCR and API calls)
-let inflightPage = null; // { hash, windowId } of the screen being translated
+let pending = null; // { force, reason } of a request waiting for the current one
+
+// The foreground job translates what's on screen; only it draws the overlay
+// and posts results. When the page changes under it, it isn't cancelled but
+// moved to the background: it finishes, fills the cache, and turning back to
+// that page is then instant. Each job: { controller (cancels its OCR wait and
+// API calls), page: { hash, windowId } once captured, detached, done (resolves
+// to the blocks it cached, or null) }.
+let current = null;
+const background = new Set();
+// Pages turned past while they were translating keep going, up to this many;
+// beyond it the oldest is cancelled, so paging on doesn't pile up requests.
+const MAX_BACKGROUND = 1;
 
 // Chrome stops this service worker after ~30 s idle, wiping module state, so
 // the page cache and last screenshot hash live in session storage (cleared
@@ -109,7 +118,18 @@ async function swapLastHash(hash) {
 
 chrome.runtime.onInstalled.addListener(() => {
   chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: true });
+  injectIntoOpenReaders();
 });
+
+// Installing or reloading the extension cuts off the content scripts in tabs
+// already open, so page turns there would go unnoticed until something
+// reinjects them. Give those tabs a live copy now.
+async function injectIntoOpenReaders() {
+  const { content_scripts: [cs] } = chrome.runtime.getManifest();
+  for (const tab of await chrome.tabs.query({ url: cs.matches })) {
+    chrome.scripting.executeScript({ target: { tabId: tab.id, allFrames: true }, files: cs.js }).catch(() => {});
+  }
+}
 
 chrome.runtime.onConnect.addListener((port) => {
   if (port.name !== "sidepanel") return;
@@ -138,7 +158,7 @@ chrome.runtime.onMessage.addListener(async (msg, sender) => {
 // Without auto-translate nothing else re-checks the screen after a page turn,
 // so do it here to keep the button label honest.
 async function refreshButtonState(windowId) {
-  if (busy) return;
+  if (current) return;
   try {
     const shown = await getShownHash();
     if (!shown) return;
@@ -239,7 +259,7 @@ async function captureHash(windowId) {
 let checking = false;
 let recheck = false;
 
-async function cancelIfPageChanged() {
+async function detachIfPageChanged() {
   // Collapse a burst of signals into one running check plus one follow-up,
   // so they don't pile up captures ahead of the next real translation.
   if (checking) {
@@ -258,21 +278,76 @@ async function cancelIfPageChanged() {
 }
 
 async function checkPageOnce() {
-  const page = inflightPage;
+  const job = current;
+  const page = job?.page;
   if (!page) return;
+  let now;
   try {
-    if ((await captureHash(page.windowId)) === page.hash || inflightPage !== page) return;
+    now = await captureHash(page.windowId);
   } catch (_) {
     return; // tab not capturable right now (e.g. another tab is in front)
   }
-  log("畫面已換頁：取消進行中的請求，改翻目前畫面");
-  inflight?.abort();
+  if (now !== page.hash && current === job) detach(job, now);
+}
+
+// Let the foreground job finish in the background and start on the new page,
+// whose content hash is `now`.
+function detach(job, now) {
+  job.detached = true;
+  if (job.waiting) {
+    // It was only waiting on a background job, which keeps going anyway.
+    log("畫面已換頁：不再等背景翻譯，先翻目前畫面");
+    release(job);
+    return;
+  }
+  background.add(job);
+  log("畫面已換頁：先前那一頁改在背景翻完並存快取，先翻目前畫面");
+  if (background.size > MAX_BACKGROUND) {
+    // Not the one for the page now on screen: turning back to it waits for it.
+    const oldest = [...background].find((j) => j.page.hash !== now);
+    background.delete(oldest);
+    oldest.controller.abort();
+    log(oldest === job ? "背景翻譯已達上限，取消剛翻走的那一頁" : "背景翻譯已達上限，取消最早的一個");
+  }
+  release(job);
+}
+
+// The foreground is free: run the queued request, if any.
+function release(job) {
+  if (current !== job) return;
+  current = null;
+  if (pending) {
+    const next = pending;
+    pending = null;
+    log("處理排隊中的請求");
+    translateActivePage(next);
+  } else {
+    // Lets the side panel stop its "translating… N s" timer even when this
+    // run ended without a result (cancelled, skipped).
+    broadcast({ type: "idle" });
+  }
+}
+
+// Turning back to a page whose translation is still running in the
+// background: wait for it rather than paying for the page twice.
+async function backgroundResult(job, hash, windowId) {
+  const running = [...background].find((j) => j.page?.hash === hash);
+  if (!running) return undefined;
+  log("這一頁還在背景翻譯，等它完成");
+  broadcast({ type: "working" });
+  job.page = { hash, windowId }; // so turning away again releases the wait
+  job.waiting = true;
+  try {
+    return (await running.done) ?? undefined;
+  } finally {
+    job.waiting = false;
+  }
 }
 
 // `reason` is the page-turn signal: "dom" is the reader re-rendering on its
 // own (reading-progress updates every 15 s or so), not a user action.
 async function translateActivePage({ force, reason }) {
-  if (busy) {
+  if (current) {
     // Run once more after the current request finishes, keeping "force" if
     // any queued trigger asked for it, and "dom" only if every trigger was
     // reader churn (so the queued run can skip without hiding the overlay).
@@ -281,164 +356,174 @@ async function translateActivePage({ force, reason }) {
       reason: !pending || pending.reason === "dom" ? reason : pending.reason,
     };
     if (reason === "overlay") return; // nothing to cancel: the screen didn't change
-    if (force && inflight) {
+    if (force) {
       // A manual retranslate wins: cancel the running API call instead of
       // waiting for it. Tokens it already used are still billed.
       log("手動翻譯：取消進行中的請求，改翻目前畫面");
-      inflight.abort();
+      current.controller.abort();
     } else {
       log("前一個請求還沒結束，排隊；同時檢查畫面是否已換頁");
-      cancelIfPageChanged();
+      detachIfPageChanged();
     }
     return;
   }
-  busy = true;
+  const job = { controller: new AbortController(), page: null, detached: false };
+  job.done = new Promise((resolve) => (job.finish = resolve));
+  current = job;
   // Calling an extension API resets the service worker's 30 s idle timer;
   // reading a response stream alone doesn't.
   const keepAlive = setInterval(() => chrome.runtime.getPlatformInfo(), 20_000);
   try {
-    const [tab] = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
-    if (!tab || !READER_RE.test(tab.url || "")) {
-      broadcast({ type: "error", text: "目前分頁不是 Kindle Cloud Reader。" });
-      return;
-    }
-    const settings = await getSettings();
-    if (!settings.apiKey) {
-      broadcast({ type: "error", text: "請先到設定頁填入 Anthropic API key。", needsKey: true });
-      return;
-    }
-
-    // The reader re-renders now and then without the page changing. Hiding
-    // the overlay to check made the original text flash, so compare the
-    // screen as it is, overlay included, with how it looked when drawn.
-    if (!force && (reason === "dom" || reason === "overlay") && settings.overlay) {
-      const { overlayHash } = await chrome.storage.session.get("overlayHash");
-      try {
-        if (overlayHash && (await captureHash(tab.windowId)) === overlayHash) {
-          log("畫面沒變（譯文還在），略過");
-          return;
-        }
-      } catch (_) {}
-    }
-
-    // Hide our own overlay first so it doesn't end up in the screenshot.
-    // The page answers with its page-turn counter; an overlay tagged with an
-    // older counter (user turned the page mid-request) gets dropped there.
-    let turn;
-    if (settings.overlay) {
-      try {
-        turn = (await sendToPage(tab.id, { type: "clearOverlay" }))?.turn;
-        await chrome.storage.session.remove("overlayHash");
-        log("已清掉頁面上的覆蓋層");
-      } catch (err) {
-        // Reported again by showOnPage; still translate for the side panel.
-        log(`清除覆蓋層失敗：${err.message}`);
-      }
-    }
-    await new Promise((r) => setTimeout(r, 80));
-
-    const dataUrl = await capture(tab.windowId);
-    const capturedAt = Date.now();
-    log(`截圖完成（${Math.round((dataUrl.length * 3) / 4 / 1024)} KB）`);
-    const hash = await contentHash(dataUrl);
-    const sameAsLast = (await swapLastHash(hash)) === hash;
-
-    // The button reads "重新翻譯本頁" while the shown translation is for this
-    // very screen; pressing it then means "ask Claude again", not "use cache".
-    const retranslate = force && hash === (await getShownHash());
-    if (retranslate) log("畫面沒變：重新翻譯本頁，不使用快取");
-    const cached = retranslate ? null : await cacheGet(hash);
-    if (cached) {
-      const blocks = cached;
-      log(`命中快取（${blocks.length} 個區塊），不呼叫 API`);
-      // Same screen re-captured (e.g. after a stray DOM change): just restore the overlay.
-      if (force || !sameAsLast) broadcast({ type: "result", text: blocksToText(blocks), cached: true, thumb: dataUrl });
-      if (settings.overlay) await showOnPage(tab.id, blocks, turn);
-      await setShownHash(hash);
-      return;
-    }
-    if (!force && sameAsLast) {
-      log("畫面跟上次一樣，略過");
-      return;
-    }
-
-    broadcast({ type: "working", thumb: dataUrl });
-    await setShownHash(null);
-    const vision = settings.engine === "vision";
-    const image = await prepareImage(dataUrl, vision);
-    inflightPage = { hash, windowId: tab.windowId };
-    inflight = new AbortController();
-    let reply;
-    try {
-      const translate = vision ? visionTranslator(settings, image) : await ocrTranslator(settings, dataUrl, image);
-      for (let attempt = 0; ; attempt++) {
-        reply = await translate();
-        if (!isSummary(reply)) break;
-        if (attempt >= SUMMARY_RETRIES) {
-          log(`重試後仍然只給摘要，先顯示摘要（不存快取）：${reply.notes || "沒有說明"}`);
-          break;
-        }
-        log(`Claude 這次只給摘要，不是翻譯（${reply.notes || "沒有說明"}），自動重新請求`);
-      }
-    } finally {
-      inflightPage = null;
-      inflight = null;
-    }
-    const summary = isSummary(reply);
-    const blocks = finishBlocks(reply.blocks, image);
-    log(`Claude 回傳 ${reply.blocks.length} 個區塊，可用 ${blocks.length} 個（從截圖起共 ${seconds(capturedAt)} 秒）`);
-    if (reply.notes) log(`Claude 的說明：${reply.notes}`);
-    const fallbackModel = reply.model && reply.model !== reply.requested ? reply.model : null;
-    if (!blocks.length) {
-      // Not cached: it may be a bad capture or a model quietly declining, and a
-      // cached empty page would never be retried. Show what Claude was sent.
-      const why = reply.notes || "沒有說明";
-      log(`沒有可用的區塊（${reply.model}；${why}），這次的截圖：`, dataUrl);
-      broadcast({ type: "warn", text: `沒有任何譯文區塊（${reply.model}）：${why}` });
-      return;
-    }
-    // A summary isn't cached, so revisiting the page asks for a translation again.
-    if (!summary) await cacheSet(hash, blocks);
-    broadcast({ type: "result", text: blocksToText(blocks), thumb: dataUrl, fallbackModel, summary });
-    // After the result, which clears the status line.
-    if (summary) broadcast({ type: "warn", text: "Claude 只給了摘要，不是完整翻譯。可以按「重新翻譯本頁」再試。" });
-    if (!settings.overlay) await setShownHash(hash); // shown in the side panel only
-    if (settings.overlay) {
-      // The page may have changed in the last moments without a signal we
-      // caught; never draw one page's translation over another.
-      let now = hash;
-      try {
-        now = await captureHash(tab.windowId);
-      } catch (_) {}
-      if (now === hash) {
-        await showOnPage(tab.id, blocks, turn);
-        await setShownHash(hash);
-      } else {
-        log("翻譯期間畫面已換頁，這份譯文不畫上去（已存快取）");
-        pending ??= { force: false };
-      }
-    }
+    await runJob(job, { force, reason });
   } catch (err) {
     if (err.name === "AbortError") {
       // Forget this screen so the queued run doesn't skip it as "unchanged".
-      await chrome.storage.session.remove("lastHash");
-      log("已取消前一個請求");
+      if (!job.detached) await chrome.storage.session.remove("lastHash");
+      log(job.detached ? "已取消一個背景翻譯" : "已取消前一個請求");
+    } else if (job.detached) {
+      log(`背景翻譯失敗：${err.message || err}`);
     } else {
       broadcast({ type: "error", text: String(err.message || err) });
       log(`失敗：${err.message || err}`);
     }
   } finally {
     clearInterval(keepAlive);
-    busy = false;
-    if (pending) {
-      const next = pending;
-      pending = null;
-      log("處理排隊中的請求");
-      translateActivePage(next);
+    job.finish(null); // no-op if it already resolved with blocks
+    background.delete(job);
+    release(job);
+  }
+}
+
+async function runJob(job, { force, reason }) {
+  const [tab] = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
+  if (!tab || !READER_RE.test(tab.url || "")) {
+    broadcast({ type: "error", text: "目前分頁不是 Kindle Cloud Reader。" });
+    return;
+  }
+  const settings = await getSettings();
+  if (!settings.apiKey) {
+    broadcast({ type: "error", text: "請先到設定頁填入 Anthropic API key。", needsKey: true });
+    return;
+  }
+
+  // The reader re-renders now and then without the page changing. Hiding
+  // the overlay to check made the original text flash, so compare the
+  // screen as it is, overlay included, with how it looked when drawn.
+  if (!force && (reason === "dom" || reason === "overlay") && settings.overlay) {
+    const { overlayHash } = await chrome.storage.session.get("overlayHash");
+    try {
+      if (overlayHash && (await captureHash(tab.windowId)) === overlayHash) {
+        log("畫面沒變（譯文還在），略過");
+        return;
+      }
+    } catch (_) {}
+  }
+
+  // Hide our own overlay first so it doesn't end up in the screenshot.
+  // The page answers with its page-turn counter; an overlay tagged with an
+  // older counter (user turned the page mid-request) gets dropped there.
+  let turn;
+  if (settings.overlay) {
+    try {
+      turn = (await sendToPage(tab.id, { type: "clearOverlay" }))?.turn;
+      await chrome.storage.session.remove("overlayHash");
+      log("已清掉頁面上的覆蓋層");
+    } catch (err) {
+      // Reported again by showOnPage; still translate for the side panel.
+      log(`清除覆蓋層失敗：${err.message}`);
+    }
+  }
+  await new Promise((r) => setTimeout(r, 80));
+
+  const dataUrl = await capture(tab.windowId);
+  const capturedAt = Date.now();
+  log(`截圖完成（${Math.round((dataUrl.length * 3) / 4 / 1024)} KB）`);
+  const hash = await contentHash(dataUrl);
+  const sameAsLast = (await swapLastHash(hash)) === hash;
+
+  // The button reads "重新翻譯本頁" while the shown translation is for this
+  // very screen; pressing it then means "ask Claude again", not "use cache".
+  const retranslate = force && hash === (await getShownHash());
+  if (retranslate) log("畫面沒變：重新翻譯本頁，不使用快取");
+  const cached = retranslate ? null : (await cacheGet(hash)) ?? (await backgroundResult(job, hash, tab.windowId));
+  if (job.detached) return; // turned away while waiting for the background job
+  if (cached) {
+    const blocks = cached;
+    log(`命中快取（${blocks.length} 個區塊），不呼叫 API`);
+    // Same screen re-captured (e.g. after a stray DOM change): just restore the overlay.
+    if (force || !sameAsLast) broadcast({ type: "result", text: blocksToText(blocks), cached: true, thumb: dataUrl });
+    if (settings.overlay) await showOnPage(tab.id, blocks, turn);
+    await setShownHash(hash);
+    return;
+  }
+  if (!force && sameAsLast) {
+    log("畫面跟上次一樣，略過");
+    return;
+  }
+
+  broadcast({ type: "working", thumb: dataUrl });
+  await setShownHash(null);
+  const vision = settings.engine === "vision";
+  const image = await prepareImage(dataUrl, vision);
+  job.page = { hash, windowId: tab.windowId };
+  const signal = job.controller.signal;
+  const translate = vision ? visionTranslator(settings, image, signal) : await ocrTranslator(settings, dataUrl, image, signal);
+  let reply;
+  for (let attempt = 0; ; attempt++) {
+    reply = await translate();
+    if (!isSummary(reply)) break;
+    if (attempt >= SUMMARY_RETRIES) {
+      log(`重試後仍然只給摘要，先顯示摘要（不存快取）：${reply.notes || "沒有說明"}`);
+      break;
+    }
+    log(`Claude 這次只給摘要，不是翻譯（${reply.notes || "沒有說明"}），自動重新請求`);
+  }
+  const summary = isSummary(reply);
+  const blocks = finishBlocks(reply.blocks, image);
+  if (job.detached) {
+    // Turned away from this page: just keep the translation for later.
+    if (blocks.length && !summary) {
+      await cacheSet(hash, blocks);
+      job.finish(blocks);
+      log(`背景翻完先前那一頁，已存快取（${blocks.length} 個區塊，從截圖起共 ${seconds(capturedAt)} 秒）`);
     } else {
-      // Lets the side panel stop its "translating… N s" timer even when this
-      // run ended without a result (cancelled, skipped).
-      broadcast({ type: "idle" });
+      log("背景翻完先前那一頁，但沒有完整譯文，不存快取");
+    }
+    return;
+  }
+  log(`Claude 回傳 ${reply.blocks.length} 個區塊，可用 ${blocks.length} 個（從截圖起共 ${seconds(capturedAt)} 秒）`);
+  if (reply.notes) log(`Claude 的說明：${reply.notes}`);
+  const fallbackModel = reply.model && reply.model !== reply.requested ? reply.model : null;
+  if (!blocks.length) {
+    // Not cached: it may be a bad capture or a model quietly declining, and a
+    // cached empty page would never be retried. Show what Claude was sent.
+    const why = reply.notes || "沒有說明";
+    log(`沒有可用的區塊（${reply.model}；${why}），這次的截圖：`, dataUrl);
+    broadcast({ type: "warn", text: `沒有任何譯文區塊（${reply.model}）：${why}` });
+    return;
+  }
+  // A summary isn't cached, so revisiting the page asks for a translation again.
+  if (!summary) {
+    await cacheSet(hash, blocks);
+    job.finish(blocks);
+  }
+  broadcast({ type: "result", text: blocksToText(blocks), thumb: dataUrl, fallbackModel, summary });
+  // After the result, which clears the status line.
+  if (summary) broadcast({ type: "warn", text: "Claude 只給了摘要，不是完整翻譯。可以按「重新翻譯本頁」再試。" });
+  if (!settings.overlay) await setShownHash(hash); // shown in the side panel only
+  if (settings.overlay) {
+    // The page may have changed in the last moments without a signal we
+    // caught; never draw one page's translation over another.
+    let now = hash;
+    try {
+      now = await captureHash(tab.windowId);
+    } catch (_) {}
+    if (now === hash) {
+      await showOnPage(tab.id, blocks, turn);
+      await setShownHash(hash);
+    } else {
+      log("翻譯期間畫面已換頁，這份譯文不畫上去（已存快取）");
+      pending ??= { force: false };
     }
   }
 }
@@ -718,9 +803,10 @@ ${JSON.stringify(items)}`;
 // { blocks (screenshot pixels, as in BLOCKS_SCHEMA), notes, summarized,
 // model, requested }, so a summary can be retried without redoing the OCR.
 
-function visionTranslator(settings, image) {
+function visionTranslator(settings, image, signal) {
   return async () => {
     const out = await callClaude(settings, {
+      signal,
       model: MODEL,
       effort: settings.effort,
       fallbacks: FALLBACK,
@@ -740,7 +826,7 @@ function visionTranslator(settings, image) {
   };
 }
 
-async function ocrTranslator(settings, dataUrl, image) {
+async function ocrTranslator(settings, dataUrl, image, jobSignal) {
   const plan = qualityOf(settings);
   const textModel = plan.translate;
   const started = Date.now();
@@ -755,18 +841,20 @@ async function ocrTranslator(settings, dataUrl, image) {
       return { blocks: [], notes: "OCR 沒有辨識到任何文字", summarized: false, model: "tesseract", requested: "tesseract" };
     }
     // Output speed is the bottleneck, so translate the chunks side by side.
+    const failed = new AbortController(); // one chunk failing stops the others
+    const signal = AbortSignal.any([jobSignal, failed.signal]);
     let outs;
     try {
       outs = await Promise.all(
         chunks.map(async (chunk, i) => {
           const tag = chunks.length > 1 ? `[${i + 1}/${chunks.length}] ` : "";
-          const draft = await translateChunk(settings, chunk, tag);
+          const draft = await translateChunk(settings, chunk, tag, signal);
           // An Opus fallback's translation doesn't need a Sonnet review.
-          return plan.review && !draft.byOpus ? reviewChunk(settings, plan.review, chunk, draft, tag) : draft;
+          return plan.review && !draft.byOpus ? reviewChunk(settings, plan.review, chunk, draft, tag, signal) : draft;
         })
       );
     } catch (err) {
-      inflight?.abort(); // don't leave the other calls running
+      failed.abort(); // don't leave the other calls running
       throw err;
     }
     const out = {
@@ -797,10 +885,11 @@ async function ocrTranslator(settings, dataUrl, image) {
 // The text model sometimes declines a chunk (copyright) or answers with a
 // summary; Haiku did in testing. Opus usually translates the same text, so
 // hand it just that chunk instead of retrying, which tends to decline again.
-async function translateChunk(settings, chunk, tag) {
+async function translateChunk(settings, chunk, tag, signal) {
   const model = qualityOf(settings).translate;
   const content = [{ type: "text", text: buildTextPrompt(settings.targetLang, chunk) }];
   const out = await callClaude(settings, {
+    signal,
     tag,
     model,
     effort: "low",
@@ -810,7 +899,7 @@ async function translateChunk(settings, chunk, tag) {
   });
   if (!isDeclined(out, chunk)) return out;
   log(`${tag}${model} 沒有完整翻譯（${(out.notes || "").trim() || "沒有說明"}），這部分改用 ${MODEL}`);
-  const fallback = await callClaude(settings, { tag, model: MODEL, effort: "low", fallbacks: FALLBACK, schema: TRANSLATIONS_SCHEMA, content });
+  const fallback = await callClaude(settings, { signal, tag, model: MODEL, effort: "low", fallbacks: FALLBACK, schema: TRANSLATIONS_SCHEMA, content });
   return { ...fallback, byOpus: true };
 }
 
@@ -821,7 +910,7 @@ function qualityOf(settings) {
 
 // Apply `model`'s corrections to a chunk's draft. A failed or declined review
 // keeps the draft: it's already a usable translation.
-async function reviewChunk(settings, model, chunk, draft, tag) {
+async function reviewChunk(settings, model, chunk, draft, tag, signal) {
   const texts = new Map((draft.translations || []).map((t) => [t.id, t.text]));
   const items = chunk
     .map((p) => ({ id: p.id, source: p.text, draft: texts.get(p.id) || "" }))
@@ -831,6 +920,7 @@ async function reviewChunk(settings, model, chunk, draft, tag) {
   let out;
   try {
     out = await callClaude(settings, {
+      signal,
       tag,
       model,
       effort: "low",
@@ -923,7 +1013,8 @@ async function ensureOffscreen() {
 // One streamed Messages API call with a JSON-schema answer. Returns the
 // parsed JSON plus the model that answered.
 // `tag` prefixes the log lines when several calls run at once.
-async function callClaude(settings, { model, effort, thinking, fallbacks, schema, content, tag = "" }) {
+// `signal` cancels it (the translation job was cancelled).
+async function callClaude(settings, { model, effort, thinking, fallbacks, schema, content, signal: jobSignal, tag = "" }) {
   const log = (text) => broadcast({ type: "log", text: tag + text, at: Date.now() });
   const fbNote = fallbacks ? `，備援：${fallbacks.fallbacks.map((f) => f.model).join(" → ")}` : "";
   log(`送出 API 請求（${model}，effort ${effort}${fbNote}），等待回應…`);
@@ -934,9 +1025,9 @@ async function callClaude(settings, { model, effort, thinking, fallbacks, schema
     // Streamed: Chrome stops a service worker whose fetch() gets no response
     // within 30 s, and a page often takes longer than that. With streaming the
     // headers arrive right away and the content trickles in.
-    // Without a timeout a hung request keeps `busy` set and blocks every
+    // Without a timeout a hung request holds the foreground job and blocks every
     // later page. The controller lets a manual retranslate cancel it.
-    const signal = AbortSignal.any([inflight.signal, AbortSignal.timeout(API_TIMEOUT_MS)]);
+    const signal = AbortSignal.any([jobSignal, AbortSignal.timeout(API_TIMEOUT_MS)]);
     signal.throwIfAborted(); // cancelled during OCR
     res = await fetch("https://api.anthropic.com/v1/messages", {
       method: "POST",
