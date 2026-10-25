@@ -1,14 +1,33 @@
 [繁體中文](README.md) | **English**
 
-# Kindle Auto-Translate (Chrome extension prototype)
+# Kindle Auto-Translate (Chrome extension)
 
-Captures the page currently shown in Kindle Cloud Reader (read.amazon.com and others), reads each paragraph and its position with local OCR (Tesseract), and has Claude Haiku translate it into Traditional Chinese, with Sonnet reviewing the translation. The translation is drawn directly over the original text on the page, and also shown in Chrome's side panel.
+Captures the page currently shown in Kindle Cloud Reader (read.amazon.com and others), reads the text with local OCR (Tesseract) and finds paragraphs and figures with the DocLayout-YOLO layout model, and has Claude Haiku translate it into Traditional Chinese, with Sonnet reviewing the translation. The translation is drawn directly over the original text on the page, and also shown in Chrome's side panel.
 
 ![Example: a two-page spread of Build a Reasoning Model (From Scratch), with the body text and captions translated in place and figures 1.1 and 1.2 left as they are, and the side panel on the right](docs/example.png)
 
-> **Status: prototype, usable for everyday reading (current version 1.0.0).** Tested on Kindle Cloud Reader's two-page layout: the translation covers the original text about 10 seconds after a page turn. Paragraphs are occasionally split wrongly, and boxes are occasionally a little off. When the overlay doesn't appear, the side panel's status line shows the reason in red, and the log below it shows each step.
+> **Current version 1.0.0.** Tested on Kindle Cloud Reader's two-page layout: the translation covers the original text about 10 seconds after a page turn. When the overlay doesn't appear, the side panel's status line shows the reason in red, and the log below it shows each step.
 
 The extension's interface is in Chinese; the labels quoted below are followed by their English meaning. The target language can be changed in the options page.
+
+## Detecting the layout with a vision model
+
+Kindle Cloud Reader shows pages as images, with no text or layout to read, so the extension works from screenshots. OCR alone only says where each line of text is: it can't tell which lines form a paragraph, which line is a heading, or which words are actually labels inside a figure.
+
+So from 1.0 the extension runs a vision model, [DocLayout-YOLO](https://github.com/opendatalab/DocLayout-YOLO), in the browser to detect the layout. It's an object-detection model trained on document pages, and it draws boxes around:
+
+- paragraphs, headings, headers and footers
+- figures and figure captions
+- tables, table captions and table footnotes
+- formulas and formula captions
+
+The extension then puts each OCR line into the box it falls in:
+
+- Lines in the same box become one paragraph, so paragraphs and headings follow the book's own layout.
+- Text inside figures, tables and formulas isn't translated, so the original figure shows instead of being covered with translated labels.
+- Captions and headings get boxes of their own, so their size and position don't mix with the body text.
+
+The model runs on your GPU through [ONNX Runtime Web](https://github.com/microsoft/onnxruntime) (WebGPU), in about 0.25 seconds for a two-page spread, and the screenshot never leaves your computer. The model file is 75 MB; it's downloaded from Hugging Face on the first translation and kept in the browser. The approach follows the PDF translator [BabelDOC](https://github.com/funstory-ai/BabelDOC).
 
 ## Install
 

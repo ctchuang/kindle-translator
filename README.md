@@ -1,12 +1,31 @@
 **繁體中文** | [English](README.en.md)
 
-# Kindle 自動翻譯（Chrome extension 原型）
+# Kindle 自動翻譯（Chrome extension）
 
-截取 Kindle Cloud Reader（read.amazon.com 等）目前顯示的頁面，用本機 OCR（Tesseract）辨識每段文字與位置，再交給 Claude Haiku 翻譯、Sonnet 校對成繁體中文。譯文直接蓋在書頁原文的位置上，也同時顯示在 Chrome 側邊欄。
+截取 Kindle Cloud Reader（read.amazon.com 等）目前顯示的頁面，用本機 OCR（Tesseract）辨識文字、DocLayout-YOLO 版面模型找出段落與圖表位置，再交給 Claude Haiku 翻譯、Sonnet 校對成繁體中文。譯文直接蓋在書頁原文的位置上，也同時顯示在 Chrome 側邊欄。
 
 ![範例：《Build a Reasoning Model (From Scratch)》雙頁版面，內文和圖說的譯文蓋在原文位置上，圖 1.1、1.2 保留原圖，右側是側邊欄](docs/example.png)
 
-> **狀態：原型，日常閱讀可用（目前版本 1.0.0）。** 在 Kindle Cloud Reader 的雙頁版面上實測，翻頁後約 10 秒譯文就會蓋上原文。段落偶爾會切錯，框也偶爾會偏一點。覆蓋層沒出現時，側邊欄狀態列會用紅字顯示原因，底下的執行紀錄可以看到每一步。
+> **目前版本 1.0.0。** 在 Kindle Cloud Reader 的雙頁版面上實測，翻頁後約 10 秒譯文就會蓋上原文。覆蓋層沒出現時，側邊欄狀態列會用紅字顯示原因，底下的執行紀錄可以看到每一步。
+
+## 用視覺模型偵測排版
+
+Kindle Cloud Reader 的書頁是圖片，沒有可以讀的文字和排版資訊，所以擴充功能看的是截圖。光靠 OCR 只知道每一行字在哪裡，分不出哪些行是同一段、哪個是標題，也分不出哪些字其實是圖裡的標籤。
+
+因此 1.0 起，擴充功能會在瀏覽器裡跑一個視覺模型 [DocLayout-YOLO](https://github.com/opendatalab/DocLayout-YOLO) 來偵測排版（layout）。它是專門看文件版面的物件偵測模型，會在書頁上框出這些區塊：
+
+- 段落、標題、頁首頁尾
+- 圖、圖說
+- 表、表說明、表註
+- 公式、公式說明
+
+擴充功能再把 OCR 讀到的每一行放進對應的區塊：
+
+- 同一個區塊的行合成一段，所以分段、標題的判斷跟書的排版一致。
+- 圖、表、公式裡的字不翻譯，原圖會露出來，不會被一堆翻譯過的標籤蓋住。
+- 圖說、標題各自成框，字級和位置不會跟內文混在一起。
+
+模型用 [ONNX Runtime Web](https://github.com/microsoft/onnxruntime) 在本機 GPU 上執行（WebGPU），雙頁約 0.25 秒，截圖不會離開電腦。模型檔 75 MB，第一次翻譯時從 Hugging Face 下載，之後存在瀏覽器裡。這個做法參考了 PDF 翻譯工具 [BabelDOC](https://github.com/funstory-ai/BabelDOC)。
 
 ## 安裝
 
