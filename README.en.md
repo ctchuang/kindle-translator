@@ -6,7 +6,7 @@ Captures the page currently shown in Kindle Cloud Reader (read.amazon.com and ot
 
 ![Example: page 8 of Ender's Game, with the translation of both pages laid over the original text and the side panel on the right](docs/example.png)
 
-> **Status: prototype, usable for everyday reading.** Tested on Kindle Cloud Reader's two-page layout: the translation covers the original text about 9 seconds after a page turn. Paragraphs are occasionally split wrongly, and boxes are occasionally a little off. When the overlay doesn't appear, the side panel's status line shows the reason in red, and the log below it shows each step.
+> **Status: prototype, usable for everyday reading (current version 0.6.0).** Tested on Kindle Cloud Reader's two-page layout: the translation covers the original text about 9 seconds after a page turn. Paragraphs are occasionally split wrongly, and boxes are occasionally a little off. When the overlay doesn't appear, the side panel's status line shows the reason in red, and the log below it shows each step.
 
 The extension's interface is in Chinese; the labels quoted below are followed by their English meaning. The target language can be changed in the options page.
 
@@ -40,6 +40,22 @@ The extension's interface is in Chinese; the labels quoted below are followed by
 - Positions are per paragraph, not per line, and boxes are occasionally a little off. In OCR mode paragraphs are split by indentation, line spacing and short lines, which occasionally merges two paragraphs or splits one.
 - Recognition gets worse when the book text is small; enlarge the reader font or the window.
 - This translates page by page for your own reading. Don't use it to export book content in bulk; that violates Amazon's terms of use.
+
+## Release notes
+
+- **0.6.0**
+  - OCR mode skips figures instead of covering them with jumbled translated labels; two-line headings and ragged-right captions are no longer split into several blocks.
+  - New Alt+O shortcut toggles translation / original.
+  - Reloading the extension no longer leaves the old button and overlay on the page.
+- **0.5.1**
+  - The options page has one 「翻譯方式」 (translation mode) setting: 1. Fast, 2. Polished, 3. Read the image.
+  - Polished mode lists each of Sonnet's changes in the log.
+  - Larger toggle button in the bottom-right corner.
+- **0.5.0**: new Polished mode, with Haiku translating and Sonnet reviewing.
+- **0.4.3**: the 「顯示原文／顯示譯文」 (show original / translation) button is back in the page's bottom-right corner; Haiku is the default model again.
+- **0.4.2**: Sonnet became the default translation model, with Haiku selectable.
+- **0.4.1**: 「譯文｜原文」 (translation | original) switch in the side panel; fixed two-page column detection while the reader shows its progress slider.
+- **0.4.0**: switched to local OCR (Tesseract) with Haiku translating the text; fixed the translation briefly flashing back to the original when the reader re-renders.
 
 ## Files
 
