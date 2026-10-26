@@ -259,3 +259,25 @@ test("a dropped port mid-translation says the request was lost", async (t) => {
   assert.equal(s.$("log").childElementCount, 1);
   await new Promise((r) => setTimeout(r, 1000 / TIME_SCALE));
 });
+
+// ---- Screenshot for tests ----
+
+test("the screenshot link asks the worker for a capture", (t) => {
+  const s = setup(t);
+  const ok = s.page.fire(s.$("saveShot"), "click", { cancelable: true });
+  assert.equal(ok, false, "doesn't toggle the <details>");
+  assert.deepEqual(s.received, [{ type: "captureNow" }]);
+});
+
+test("a screenshot from the worker is saved as a download", (t) => {
+  const s = setup(t);
+  const clicked = [];
+  const create = s.page.document.createElement.bind(s.page.document);
+  s.page.document.createElement = (tag) => {
+    const el = create(tag);
+    if (tag === "a") el.click = () => clicked.push({ href: el.href, download: el.download });
+    return el;
+  };
+  s.post({ type: "screenshot", dataUrl: "data:image/jpeg;base64,AAAA", filename: "kindle-B0X-20261026-101500.jpg" });
+  assert.deepEqual(clicked, [{ href: "data:image/jpeg;base64,AAAA", download: "kindle-B0X-20261026-101500.jpg" }]);
+});

@@ -5,6 +5,7 @@ const test = require("node:test");
 const assert = require("node:assert/strict");
 const { plain, waitFor } = require("./helpers/load");
 const { startExtension } = require("./helpers/extension");
+const { parseScreenUrl } = require("./helpers/images");
 
 // The page a request is for: the paragraphs start with the page name.
 function pageOf(req) {
@@ -773,5 +774,59 @@ test.describe("talking to the page and the panel", () => {
     await ext.tick();
     assert.equal(port.sent.length + ext.received.length, n);
     assert.equal(ext.ctx.run("panelPorts.size"), 0);
+  });
+});
+
+test.describe("saving a screenshot for tests", () => {
+  async function shoot(ext) {
+    ext.port.postMessage({ type: "captureNow" });
+    await waitFor(() => ext.msgs("screenshot").length || ext.msgs("error").length, { what: "screenshot" });
+  }
+
+  test("captures the bare page the way translation does and names it by book", async () => {
+    const ext = startExtension();
+    await shoot(ext);
+    const [shot] = ext.msgs("screenshot");
+    assert.match(shot.filename, /^kindle-B0TESTBOOK-\d{8}-\d{6}\.jpg$/);
+    assert.deepEqual(plain(parseScreenUrl(shot.dataUrl)).overlay, null);
+    assert.ok(ext.received.some((m) => m.type === "log" && /^已截圖：kindle-B0TESTBOOK-/.test(m.text) && m.image === shot.dataUrl));
+  });
+
+  test("hides the translation for the shot and draws it back from the cache", async () => {
+    const ext = startExtension();
+    await ext.translate();
+    const calls = ext.claude.calls.length;
+    await shoot(ext);
+    assert.equal(parseScreenUrl(ext.msgs("screenshot")[0].dataUrl).overlay, null, "no overlay in the shot");
+    await waitFor(() => ext.ctx.run("current"));
+    await ext.idle();
+    assert.equal(ext.tab.overlay?.page, "p1", "overlay back");
+    assert.equal(ext.claude.calls.length, calls, "no new API calls");
+  });
+
+  test("waits for a running translation instead of disturbing it", async () => {
+    const gate = deferred();
+    const ext = startExtension({ claude: async () => (await gate.promise, undefined) });
+    ext.ctx.translateActivePage({ force: true });
+    await waitFor(() => ext.claude.calls.length);
+    ext.port.postMessage({ type: "captureNow" });
+    await waitFor(() => ext.hasLog(/翻譯進行中，等完成再截圖/), { what: "refusal log" });
+    assert.equal(ext.msgs("screenshot").length, 0);
+    gate.resolve();
+    await ext.idle();
+  });
+
+  test("only on a Kindle tab", async () => {
+    const ext = startExtension();
+    ext.chrome._.activeTab = { id: 2, windowId: 1, url: "https://example.com/", active: true };
+    await shoot(ext);
+    assert.equal(ext.msgs("error")[0].text, "目前分頁不是 Kindle Cloud Reader。");
+  });
+
+  test("a failed capture is reported", async () => {
+    const ext = startExtension();
+    ext.chrome._.screen = null;
+    await shoot(ext);
+    assert.match(ext.msgs("error")[0].text, /^截圖失敗：/);
   });
 });

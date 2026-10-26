@@ -177,6 +177,7 @@ chrome.runtime.onConnect.addListener((port) => {
       log("手動翻譯：按下「翻譯這一頁」");
       translateActivePage({ force: true });
     }
+    if (msg.type === "captureNow") saveScreenshot(port);
   });
 });
 
@@ -193,6 +194,42 @@ chrome.runtime.onMessage.addListener(async (msg, sender) => {
   log(`偵測到翻頁（${msg.reason}${cleared}）`);
   translateActivePage({ force: false, reason: msg.reason });
 });
+
+// Development aid: the screen exactly as translation captures it (same
+// call, format and quality, our overlay hidden), for the side panel to save
+// as a test input. The overlay is redrawn afterwards, from the cache.
+async function saveScreenshot(port) {
+  if (current) {
+    log("翻譯進行中，等完成再截圖");
+    return;
+  }
+  const [tab] = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
+  if (!tab || !READER_RE.test(tab.url || "")) {
+    broadcast({ type: "error", text: "目前分頁不是 Kindle Cloud Reader。" });
+    return;
+  }
+  let hidden = false;
+  try {
+    hidden = !!(await sendToPage(tab.id, { type: "overlayState" }))?.shown;
+    if (hidden) await sendToPage(tab.id, { type: "clearOverlay" });
+  } catch (_) {} // no content script: there's no overlay to hide either
+  let dataUrl;
+  try {
+    dataUrl = await capture(tab.windowId);
+  } catch (err) {
+    broadcast({ type: "error", text: `截圖失敗：${err.message}` });
+    return;
+  } finally {
+    if (hidden) translateActivePage({ force: false, reason: "overlay" });
+  }
+  const asin = new URL(tab.url).searchParams.get("asin") || "unknown";
+  const stamp = new Date().toISOString().replace(/[-:]/g, "").replace("T", "-").slice(0, 15);
+  const filename = `kindle-${asin}-${stamp}.jpg`;
+  log(`已截圖：${filename}（${Math.round((dataUrl.length * 3) / 4 / 1024)} KB）`, dataUrl);
+  try {
+    port.postMessage({ type: "screenshot", dataUrl, filename });
+  } catch (_) {} // the panel closed meanwhile
+}
 
 // Whether a side panel is open. Not panelPorts: Chrome stops this worker
 // after 30 s idle, and the page-turn message that wakes it arrives before the

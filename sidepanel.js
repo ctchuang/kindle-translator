@@ -95,10 +95,19 @@ function onMessage(msg) {
     addPage(msg.text, msg.cached, msg.fallbackModel, msg.summary);
   }
   if (msg.type === "warn") setStatus(msg.text, true);
+  if (msg.type === "screenshot") saveFile(msg.dataUrl, msg.filename);
   if (msg.type === "error") {
     setStatus(msg.text, true);
     if (msg.needsKey) chrome.runtime.openOptionsPage();
   }
+}
+
+// Into the browser's downloads folder; no downloads permission needed.
+function saveFile(href, filename) {
+  const a = document.createElement("a");
+  a.href = href;
+  a.download = filename;
+  a.click();
 }
 
 // Chrome may stop the background service worker; that drops the port and any
@@ -122,6 +131,10 @@ connect();
 const translateBtn = document.getElementById("translate");
 translateBtn.onclick = () => port.postMessage({ type: "translateNow" });
 document.getElementById("options").onclick = () => chrome.runtime.openOptionsPage();
+document.getElementById("saveShot").onclick = (e) => {
+  e.preventDefault(); // don't toggle the <details>
+  port.postMessage({ type: "captureNow" });
+};
 document.getElementById("clearLog").onclick = (e) => {
   e.preventDefault(); // don't toggle the <details>
   logEl.replaceChildren();
