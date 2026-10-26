@@ -216,14 +216,32 @@ API 一律用串流：service worker 的 fetch 超過 30 秒沒有回應會被 C
 
 ## 9. 測試
 
-測試程式不在 repo 裡。都是 Node 腳本，直接載入擴充功能的原始碼，把 Chrome API 換成假的：
+測試在 `tests/`，用 Node 內建的 test runner，不需要安裝任何套件。執行：`npm test`（Node 22 以上）。
 
-- **流程模擬**：用假的截圖和串流回應，跑完整的 `translateActivePage`。情境包括翻譯、Kindle 自己重繪、排隊、翻頁移到背景、翻回正在背景翻譯的頁面、精修校對與校對失敗、Opus 補翻、看圖模式。
+擴充功能的原始碼不改，測試用 `node:vm` 像 Chrome 一樣把它們當成 classic script 載入，周圍換成假的（`tests/helpers/`）：
+
+- `load.js`：載入腳本。計時器加快 50 倍，`AbortSignal.timeout` 加快 200 倍，所以 600 毫秒的截圖間隔、1.2 秒的翻頁 debounce、180 秒的 API 逾時都不會拖慢測試。
+- `chrome.js`：`chrome.*` API（storage、runtime、tabs、scripting、offscreen 等），測試從 `chrome._` 接上另一端。
+- `images.js`：合成的截圖。每頁的「字」位置不同，所以頁面指紋分得出來；可以設定主題（白、米色、深色）、雙頁、譯文覆蓋層、工具列。
+- `claude.js`：假的 Messages API，回應用串流（SSE）送出，可以模擬拒絕、錯誤、逾時、備援模型接手。
+- `extension.js`：把以上組起來跑 `background.js`，包括假的 Kindle 分頁（content script）、offscreen OCR 和側邊欄。
+- `dom.js`：給 `content.js`、`sidepanel.js`、`options.js` 用的最小 DOM，含簡單的文字量測（`fitText` 要用）。
+
+涵蓋範圍：
+
+- **`background.js`**：完整流程（截圖、OCR、翻譯、校對、畫上譯文、快取），翻頁移到背景、翻回背景中的頁、背景上限、排隊與取消、Opus 補翻、摘要重試、看圖模式、各種 API 錯誤與逾時、覆蓋層開關和快捷鍵；以及各個輔助函式和 `callClaude` 的請求格式。
+- **`content.js`**：翻頁偵測與 debounce、iframe 轉送、覆蓋層的位置和字級、切換按鈕。
+- **`ocr-layout.js`、`page-sig.js`**：分欄、分段、版面模型的區塊、頁面指紋的門檻。
+- **`offscreen.js`、`layout-model.js`**：OCR 請求、模型下載、快取、校驗、letterbox。
+- **`sidepanel.js`、`options.js`**：訊息顯示、按鈕和設定的對應。
+
+Tesseract、ONNX Runtime 和 canvas 都是假的，所以測試不驗證實際的 OCR 結果、模型輸出和影像縮放。這些要用真實截圖手動確認：
+
 - **版面與分段**：對真實截圖跑 Tesseract（`tesseract.js` for Node），比較改動前後的分段結果。
-- **版面模型**：用 `onnxruntime-node` 對真實截圖跑 DocLayout-YOLO，把框畫在截圖上目視檢查，並和舊的規則分段並排比較。
+- **版面模型**：用 `onnxruntime-node` 對真實截圖跑 DocLayout-YOLO，把框畫在截圖上目視檢查。
 - **頁面指紋**：對真實截圖計算差異。同一頁的各種情況、不同頁之間都要落在門檻的正確一側。
 
-`ocr-layout.js` 和 `page-sig.js` 都是不依賴瀏覽器的純函式，最後一行用 `module.exports` 匯出給 Node 使用，所以能直接拿真實資料測試。
+真實截圖是書的內容，不放進 repo。
 
 ## 10. 已知限制
 

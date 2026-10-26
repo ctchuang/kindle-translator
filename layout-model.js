@@ -47,6 +47,7 @@ async function modelBytes() {
   const cache = await caches.open(LAYOUT_CACHE);
   const hit = await cache.match(LAYOUT_MODEL_URL);
   if (hit) return new Uint8Array(await hit.arrayBuffer());
+  reportedProgress = -1; // a retry after a failed download starts over at 0%
   reportProgress(0);
   const res = await fetch(LAYOUT_MODEL_URL);
   if (!res.ok) throw new Error(`下載版面模型失敗：HTTP ${res.status}`);

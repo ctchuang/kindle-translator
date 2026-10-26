@@ -182,7 +182,6 @@ pickReferencePages(entries, current, { maxTokens }) → [{ page, location, pairs
 
 - **讀不到頁碼的書**：改用翻譯的先後順序，還是直接不送參考頁？目前的設計是不送。
 - **本頁之後的頁**：往回翻時，後面已經翻過的頁要不要也當參考？目前不送，以免 Sonnet 用到還沒讀到的內容。
-- **測試程式放哪**：design.md §9 說測試不在 repo 裡。`pickReferencePages` 的單元測試要不要第一次放進 repo（例如 `tests/`）？
 
 ## 7. 工作分解
 
@@ -207,7 +206,7 @@ pickReferencePages(entries, current, { maxTokens }) → [{ page, location, pairs
 **3. 挑選參考頁**
 - 3.1 新增 `context-pages.js`，實作 §3.3。
 - 3.2 參考集起點 `refStart` 的維護（跟參考頁一起存在 `ref:<book>`）。
-- 3.3 單元測試：換書、往後讀、超過上限時丟掉一半、跳到前面、沒有頁碼、舊格式 entry。
+- 3.3 單元測試（`tests/context-pages.test.js`，`npm test`）：換書、往後讀、超過上限時丟掉一半、跳到前面、沒有頁碼、舊格式 entry。
 
 **4. 送給 Sonnet**
 - 4.1 校對改成一頁一次（§3.4）。不依賴其他步驟，可以先單獨上線，用執行紀錄比較前後的時間。

@@ -1,0 +1,8 @@
+{
+  "name": "kindle-translator",
+  "private": true,
+  "description": "Chrome extension; this file only defines the test command (no dependencies).",
+  "scripts": {
+    "test": "node --test \"tests/**/*.test.js\""
+  }
+}
