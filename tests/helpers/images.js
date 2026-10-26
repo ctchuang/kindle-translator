@@ -93,9 +93,42 @@ function renderer(spec) {
   };
 }
 
+// Real screenshots (tests/fixtures) are JPEGs; decoding a 4714×2924 one takes
+// a third of a second, so keep the result.
+const decoded = new Map();
+function decodeJpeg(bytes) {
+  const key = require("node:crypto").createHash("sha1").update(bytes).digest("hex");
+  if (!decoded.has(key)) decoded.set(key, require("jpeg-js").decode(bytes, { maxMemoryUsageInMB: 1024 }));
+  return decoded.get(key);
+}
+
+// RGB of the source rectangle [x0, x1) × [y0, y1) averaged, like a canvas
+// downscaling with imageSmoothingQuality "high"; nearest pixel when not
+// shrinking.
+function areaAverage({ width, height, data }, x0, y0, x1, y1) {
+  const xa = Math.max(0, Math.floor(x0));
+  const ya = Math.max(0, Math.floor(y0));
+  const xb = Math.min(width, Math.max(xa + 1, Math.round(x1)));
+  const yb = Math.min(height, Math.max(ya + 1, Math.round(y1)));
+  let r = 0;
+  let g = 0;
+  let b = 0;
+  let n = 0;
+  for (let y = ya; y < yb; y++) {
+    for (let x = xa; x < xb; x++) {
+      const i = (y * width + x) * 4;
+      r += data[i];
+      g += data[i + 1];
+      b += data[i + 2];
+      n++;
+    }
+  }
+  return n ? [r / n, g / n, b / n] : [0, 0, 0];
+}
+
 // Globals for the extension scripts: fetch() of a data URL, createImageBitmap
 // and OffscreenCanvas. The canvas remembers its last drawImage and samples
-// the source screen when its pixels are read.
+// the source (a synthetic screen or a decoded JPEG) when its pixels are read.
 function imageGlobals() {
   async function fetchDataUrl(url) {
     const blob = url.startsWith("data:image/x-fake")
@@ -106,6 +139,10 @@ function imageGlobals() {
 
   async function createImageBitmap(blob) {
     if (blob.__screen) return { width: blob.__screen.w, height: blob.__screen.h, __screen: blob.__screen };
+    if (blob.__bytes[0] === 0xff && blob.__bytes[1] === 0xd8) {
+      const img = decodeJpeg(blob.__bytes);
+      return { width: img.width, height: img.height, __rgba: img };
+    }
     // A PNG this fake canvas encoded: its JSON says what was drawn.
     const drawn = JSON.parse(blob.__bytes.toString());
     return { width: drawn.width, height: drawn.height, __drawn: drawn };
@@ -130,6 +167,26 @@ function imageGlobals() {
           const data = new Uint8ClampedArray(w * h * 4);
           const d = canvas.draw;
           const render = d?.img.__screen ? renderer(d.img.__screen) : null;
+          if (d?.img.__rgba) {
+            const fx = d.sw / d.dw;
+            const fy = d.sh / d.dh;
+            for (let y = 0; y < h; y++) {
+              for (let x = 0; x < w; x++) {
+                const i = (y * w + x) * 4;
+                data[i + 3] = 255;
+                const px = x0 + x;
+                const py = y0 + y;
+                if (px < d.dx || py < d.dy || px >= d.dx + d.dw || py >= d.dy + d.dh) continue;
+                const sx = d.sx + (px - d.dx) * fx;
+                const sy = d.sy + (py - d.dy) * fy;
+                const c = areaAverage(d.img.__rgba, sx, sy, sx + fx, sy + fy);
+                data[i] = c[0];
+                data[i + 1] = c[1];
+                data[i + 2] = c[2];
+              }
+            }
+            return { width: w, height: h, data };
+          }
           for (let y = 0; y < h; y++) {
             for (let x = 0; x < w; x++) {
               const i = (y * w + x) * 4;
@@ -173,4 +230,11 @@ function decodeDrawn(dataUrl) {
   return JSON.parse(Buffer.from(dataUrl.slice(dataUrl.indexOf(",") + 1), "base64").toString());
 }
 
-module.exports = { THEMES, screen, screenUrl, parseScreenUrl, renderer, imageGlobals, decodeDrawn, rng };
+// A fixture screenshot (tests/fixtures/<name>) as the data URL
+// captureVisibleTab would have returned.
+function fixtureUrl(name) {
+  const bytes = require("node:fs").readFileSync(require("node:path").join(__dirname, "..", "fixtures", name));
+  return `data:image/jpeg;base64,${bytes.toString("base64")}`;
+}
+
+module.exports = { THEMES, screen, screenUrl, parseScreenUrl, renderer, imageGlobals, decodeDrawn, rng, decodeJpeg, fixtureUrl };

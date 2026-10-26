@@ -1,8 +1,11 @@
 {
   "name": "kindle-translator",
   "private": true,
-  "description": "Chrome extension; this file only defines the test command (no dependencies).",
+  "description": "Chrome extension; this file only defines the test command and its dev dependency.",
   "scripts": {
     "test": "node --test \"tests/**/*.test.js\""
+  },
+  "devDependencies": {
+    "jpeg-js": "0.4.4"
   }
 }

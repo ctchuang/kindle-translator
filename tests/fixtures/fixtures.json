@@ -1,0 +1,20 @@
+[
+  {
+    "file": "pride-ch7-p33-single-sepia.jpg",
+    "book": "Pride and Prejudice (Jane Austen), Kindle B0BS1KYZB6",
+    "page": 33,
+    "layout": "single",
+    "theme": "sepia",
+    "columns": 1,
+    "notes": "Chapter 7 opening: heading, drop cap, dialogue. Text runs the full width; translation overlay off."
+  },
+  {
+    "file": "pride-ch7-p33-spread-white.jpg",
+    "book": "Pride and Prejudice (Jane Austen), Kindle B0BS1KYZB6",
+    "page": 33,
+    "layout": "spread",
+    "theme": "white",
+    "columns": 2,
+    "notes": "Same place as a two-page spread. The progress slider crosses the gutter; the right page's first line sits in the top 6%."
+  }
+]

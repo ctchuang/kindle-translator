@@ -108,7 +108,7 @@ Kindle Cloud Reader 的書頁是圖片，沒有可以讀的文字和排版資訊
 
 ## 開發
 
-測試用 Node 內建的 test runner，不需要安裝任何套件。需要 Node 22 以上。在 repo 根目錄執行：
+測試用 Node 內建的 test runner，需要 Node 22 以上。唯一的套件是解 JPEG 的 `jpeg-js`，第一次先在 repo 根目錄執行 `npm install`。之後：
 
 ```bash
 npm test                                                  # 全部
@@ -117,7 +117,7 @@ node --test --test-name-pattern="cache" "tests/**/*.test.js"  # 名稱符合的�
 node --test --watch "tests/**/*.test.js"                  # 改程式時自動重跑
 ```
 
-測試把擴充功能的檔案原封不動地載入，周圍的 Chrome API、截圖、OCR、Claude API 和 DOM 都換成假的，所以不需要瀏覽器、API key 或網路，跑一次約 15 秒。Tesseract 和版面模型的實際輸出不在測試範圍內，要用真實截圖確認。測試的架構見 [docs/design.md](docs/design.md) 第 9 節。
+測試把擴充功能的檔案原封不動地載入，周圍的 Chrome API、截圖、OCR、Claude API 和 DOM 都換成假的，所以不需要瀏覽器、API key 或網路，跑一次約 15 秒。`tests/fixtures/` 裡有幾張沒有版權的書的真實截圖（用側邊欄執行紀錄的「存下截圖」存下），用來測頁面指紋、裁切、分欄和顏色。Tesseract 和版面模型的實際輸出不在測試範圍內，要用真實截圖確認。測試的架構見 [docs/design.md](docs/design.md) 第 9 節。
 
 改動擴充功能後，到 `chrome://extensions` 按擴充功能的重新載入，再重新整理 Kindle 分頁。
 

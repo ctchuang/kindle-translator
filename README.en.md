@@ -110,7 +110,7 @@ The detailed design (in Chinese) is in [docs/design.md](docs/design.md).
 
 ## Development
 
-The tests use Node's built-in test runner and need no packages, only Node 22 or later. From the repo root:
+The tests use Node's built-in test runner and need Node 22 or later. The one package, `jpeg-js` for decoding JPEGs, is installed with `npm install` in the repo root the first time. Then:
 
 ```bash
 npm test                                                  # everything
@@ -119,7 +119,7 @@ node --test --test-name-pattern="cache" "tests/**/*.test.js"  # tests whose name
 node --test --watch "tests/**/*.test.js"                  # rerun on every change
 ```
 
-The tests load the extension's files unchanged and replace everything around them (Chrome APIs, screenshots, OCR, the Claude API, the DOM) with fakes, so they need no browser, API key or network, and take about 15 seconds. What Tesseract and the layout model actually output isn't covered; check that with real screenshots. How the tests are built is in section 9 of [docs/design.md](docs/design.md) (in Chinese).
+The tests load the extension's files unchanged and replace everything around them (Chrome APIs, screenshots, OCR, the Claude API, the DOM) with fakes, so they need no browser, API key or network, and take about 15 seconds. `tests/fixtures/` holds a few real screenshots of public-domain books (saved with 存下截圖 in the side panel's log), used to test the fingerprint, crop, columns and colors. What Tesseract and the layout model actually output isn't covered; check that with real screenshots. How the tests are built is in section 9 of [docs/design.md](docs/design.md) (in Chinese).
 
 After changing the extension, reload it on `chrome://extensions`, then reload the Kindle tab.
 

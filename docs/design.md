@@ -216,7 +216,7 @@ API 一律用串流：service worker 的 fetch 超過 30 秒沒有回應會被 C
 
 ## 9. 測試
 
-測試在 `tests/`，用 Node 內建的 test runner，不需要安裝任何套件。執行：`npm test`（Node 22 以上）。
+測試在 `tests/`，用 Node 內建的 test runner（Node 22 以上）。唯一的套件是解 JPEG 的 `jpeg-js`：先 `npm install`，再 `npm test`。
 
 擴充功能的原始碼不改，測試用 `node:vm` 像 Chrome 一樣把它們當成 classic script 載入，周圍換成假的（`tests/helpers/`）：
 
@@ -226,6 +226,8 @@ API 一律用串流：service worker 的 fetch 超過 30 秒沒有回應會被 C
 - `claude.js`：假的 Messages API，回應用串流（SSE）送出，可以模擬拒絕、錯誤、逾時、備援模型接手。
 - `extension.js`：把以上組起來跑 `background.js`，包括假的 Kindle 分頁（content script）、offscreen OCR 和側邊欄。
 - `dom.js`：給 `content.js`、`sidepanel.js`、`options.js` 用的最小 DOM，含簡單的文字量測（`fitText` 要用）。
+
+`tests/fixtures/` 是真實的 Kindle Cloud Reader 截圖，只用沒有版權的書。用側邊欄執行紀錄的「存下截圖」存下：它跟翻譯時用同一個 `captureVisibleTab` 呼叫和 JPEG 品質，並先隱藏譯文，所以就是 OCR 實際拿到的畫面。每張的條件（書、頁碼、單頁或雙頁、主題、預期欄數）記在 `fixtures.json`。假的 canvas 會解開 JPEG，縮小時取區域平均，所以 `pageSigOf`、`ocrPage` 的裁切與分欄、`finishBlocks` 的取色都用 `background.js` 本身的程式跑在真實畫面上。
 
 涵蓋範圍：
 
@@ -241,7 +243,7 @@ Tesseract、ONNX Runtime 和 canvas 都是假的，所以測試不驗證實際�
 - **版面模型**：用 `onnxruntime-node` 對真實截圖跑 DocLayout-YOLO，把框畫在截圖上目視檢查。
 - **頁面指紋**：對真實截圖計算差異。同一頁的各種情況、不同頁之間都要落在門檻的正確一側。
 
-真實截圖是書的內容，不放進 repo。
+有版權的書的截圖不放進 repo。
 
 ## 10. 已知限制
 
