@@ -64,6 +64,12 @@ The model runs on your GPU through [ONNX Runtime Web](https://github.com/microso
 
 ## Release notes
 
+- **1.1.0**: OCR reads only the area where Kindle draws the book page.
+  - The page reports where that is, instead of a fixed share of the screen, which cut off the chapter heading and first line in tall windows and took in the title bar in short ones. It now works the same at any window size, zoom or screen resolution.
+  - The same-page check looks at the same area, so the toolbar sliding in and out no longer counts as a page turn.
+  - 存下截圖 also saves a `.json` with where the page was drawn, for tests.
+  - The options page has a new developer section that lets a test tool trigger screenshots (off by default).
+  - Fixed the background worker answering the page's messages with an empty reply first.
 - **1.0.1**: the same-page threshold is loosened from 8% to 15%, so small changes on screen no longer count as a page turn. The side panel's log has a new 存下截圖 button that saves the current screen as a test screenshot. Retrying a failed model download now restarts its progress from 0.
 - **1.0.0**: the DocLayout-YOLO layout model (WebGPU) now finds paragraphs, headings, captions, figures and tables, replacing the guesswork from indentation, line spacing and word gaps; text inside figures, tables and formulas stays in the original. The model is downloaded on first use (75 MB) and kept in the browser; if it can't run, the extension reports an error instead of falling back. The side panel shows the model's status.
 - **0.6.3**: the default translation mode is now 2. Polished (Haiku translates, Sonnet reviews).

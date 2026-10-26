@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Kindle 自動翻譯",
-  "version": "1.0.1",
+  "version": "1.1.0",
   "description": "截取 Kindle Cloud Reader 目前頁面，用 OCR 辨識文字、Claude 翻譯成繁體中文，譯文蓋回書頁原位，也顯示在側邊欄。",
   "permissions": [
     "sidePanel",

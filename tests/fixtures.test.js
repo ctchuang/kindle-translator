@@ -86,6 +86,32 @@ test("the same screenshot fingerprints identically", async () => {
   }
 });
 
+test("the same page with the toolbar showing or not is the same page", async () => {
+  // The toolbar, page arrows and progress slider are outside the page image.
+  const ext = worker();
+  const pairs = FIXTURES.filter((f) => f.samePageAs);
+  assert.ok(pairs.length >= 1);
+  for (const fx of pairs) {
+    const other = byFile(fx.samePageAs);
+    const a = await ext.ctx.pageSigOf(fixtureUrl(fx.file), fx.geometry);
+    const b = await ext.ctx.pageSigOf(fixtureUrl(other.file), other.geometry);
+    assert.ok(ext.ctx.samePage(a, b), `${fx.file} vs ${other.file}: ${ext.ctx.pageDiff(a, b)}`);
+  }
+});
+
+test("different pages of a book are different screens", async () => {
+  const ext = worker();
+  const spreads = FIXTURES.filter((f) => f.file.startsWith("alice-") && f.layout === "spread" && !f.samePageAs);
+  assert.ok(spreads.length >= 3);
+  const sigs = await Promise.all(spreads.map((f) => ext.ctx.pageSigOf(fixtureUrl(f.file), f.geometry)));
+  for (let i = 0; i < spreads.length; i++) {
+    for (let j = i + 1; j < spreads.length; j++) {
+      // Far from the threshold, even for neighbouring pages.
+      assert.ok(ext.ctx.pageDiff(sigs[i], sigs[j]) > 0.5, `${spreads[i].file} vs ${spreads[j].file}: ${ext.ctx.pageDiff(sigs[i], sigs[j])}`);
+    }
+  }
+});
+
 test("the same page laid out as one column and as a spread are different screens", async () => {
   // Otherwise resizing the window would redraw the old layout's boxes.
   const ext = worker();
@@ -105,6 +131,17 @@ test("a sepia page: warm background, dark brown ink", async () => {
   assert.ok(r > g && g > bl, `warm background ${b.bg}`);
   assert.ok(lumaOf(b.bg) > 200, b.bg);
   assert.ok(lumaOf(b.fg) < 110, b.fg);
+});
+
+test("a dark page: black background, light ink", async () => {
+  const ext = worker();
+  const fx = byFile("alice-ch1-loc91-single-dark.jpg");
+  const img = await ext.ctx.prepareImage(fixtureUrl(fx.file), false);
+  const s = img.width / fx.geometry.viewport.width;
+  // The first paragraph, just below the top of the page image.
+  const [b] = plain(ext.ctx.finishBlocks([{ text: "x", x0: 200 * s, y0: 80 * s, x1: 1290 * s, y1: 140 * s }], img));
+  assert.ok(lumaOf(b.bg) < 40, b.bg);
+  assert.ok(lumaOf(b.fg) > 150, b.fg);
 });
 
 test("a white page: white background, black ink", async () => {

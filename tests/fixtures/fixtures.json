@@ -46,5 +46,204 @@
       "estimated": "Taken before 存下截圖 saved geometry. Scale from the title bar (62 CSS px = 135 image px, so 2.2: a 2x screen at 110% zoom); page image placed as measured in the DOM of another window: 10–90% of the width, 60 px from the top to 90 px from the bottom."
     },
     "topLine": true
+  },
+  {
+    "file": "alice-ch1-loc43-spread-white.jpg",
+    "book": "Alice in Wonderland (Lewis Carroll, 1865), Kindle B0C6HJ7TCR",
+    "location": 43,
+    "layout": "spread",
+    "theme": "white",
+    "columns": 2,
+    "notes": "Chapter I opening: chapter number, title and a drop cap at the top of the left page. Taken with the developer capture while Claude in Chrome drove the browser: its orange glow tints the outermost ~2% of the screen, outside the page image.",
+    "geometry": {
+      "viewport": {
+        "width": 1490,
+        "height": 933
+      },
+      "dpr": 3,
+      "page": {
+        "left": 149,
+        "top": 60,
+        "right": 1341,
+        "bottom": 843
+      }
+    }
+  },
+  {
+    "file": "alice-ch1-loc84-spread-white.jpg",
+    "book": "Alice in Wonderland (Lewis Carroll, 1865), Kindle B0C6HJ7TCR",
+    "location": 84,
+    "layout": "spread",
+    "theme": "white",
+    "columns": 2,
+    "notes": "Tenniel illustration on the left page; \"****\" scene breaks on the right. Taken with the developer capture while Claude in Chrome drove the browser: its orange glow tints the outermost ~2% of the screen, outside the page image.",
+    "geometry": {
+      "viewport": {
+        "width": 1490,
+        "height": 933
+      },
+      "dpr": 3,
+      "page": {
+        "left": 149,
+        "top": 60,
+        "right": 1341,
+        "bottom": 843
+      }
+    }
+  },
+  {
+    "file": "alice-ch1-loc84-spread-white-toolbar.jpg",
+    "book": "Alice in Wonderland (Lewis Carroll, 1865), Kindle B0C6HJ7TCR",
+    "location": 84,
+    "layout": "spread",
+    "theme": "white",
+    "columns": 2,
+    "notes": "Same screen with the reader toolbar, page arrows and progress slider showing. Taken with the developer capture while Claude in Chrome drove the browser: its orange glow tints the outermost ~2% of the screen, outside the page image.",
+    "geometry": {
+      "viewport": {
+        "width": 1490,
+        "height": 933
+      },
+      "dpr": 3,
+      "page": {
+        "left": 149,
+        "top": 60,
+        "right": 1341,
+        "bottom": 843
+      }
+    },
+    "samePageAs": "alice-ch1-loc84-spread-white.jpg"
+  },
+  {
+    "file": "alice-ch1-loc115-spread-white.jpg",
+    "book": "Alice in Wonderland (Lewis Carroll, 1865), Kindle B0C6HJ7TCR",
+    "location": 115,
+    "layout": "spread",
+    "theme": "white",
+    "columns": 2,
+    "notes": "The page after loc 84: the left page is full, the right page ends a scene halfway down. Taken with the developer capture while Claude in Chrome drove the browser: its orange glow tints the outermost ~2% of the screen, outside the page image.",
+    "geometry": {
+      "viewport": {
+        "width": 1490,
+        "height": 933
+      },
+      "dpr": 3,
+      "page": {
+        "left": 149,
+        "top": 60,
+        "right": 1341,
+        "bottom": 843
+      }
+    }
+  },
+  {
+    "file": "alice-ch1-loc91-single-white.jpg",
+    "book": "Alice in Wonderland (Lewis Carroll, 1865), Kindle B0C6HJ7TCR",
+    "location": 91,
+    "layout": "single",
+    "theme": "white",
+    "columns": 1,
+    "notes": "Single column, default font size. Taken with the developer capture while Claude in Chrome drove the browser: its orange glow tints the outermost ~2% of the screen, outside the page image.",
+    "geometry": {
+      "viewport": {
+        "width": 1490,
+        "height": 933
+      },
+      "dpr": 3,
+      "page": {
+        "left": 149,
+        "top": 60,
+        "right": 1341,
+        "bottom": 843
+      }
+    }
+  },
+  {
+    "file": "alice-ch1-loc91-single-sepia.jpg",
+    "book": "Alice in Wonderland (Lewis Carroll, 1865), Kindle B0C6HJ7TCR",
+    "location": 91,
+    "layout": "single",
+    "theme": "sepia",
+    "columns": 1,
+    "notes": "Sepia page color. Taken with the developer capture while Claude in Chrome drove the browser: its orange glow tints the outermost ~2% of the screen, outside the page image.",
+    "geometry": {
+      "viewport": {
+        "width": 1490,
+        "height": 933
+      },
+      "dpr": 3,
+      "page": {
+        "left": 149,
+        "top": 60,
+        "right": 1341,
+        "bottom": 843
+      }
+    }
+  },
+  {
+    "file": "alice-ch1-loc91-single-dark.jpg",
+    "book": "Alice in Wonderland (Lewis Carroll, 1865), Kindle B0C6HJ7TCR",
+    "location": 91,
+    "layout": "single",
+    "theme": "dark",
+    "columns": 1,
+    "notes": "Black page color, light text. Taken with the developer capture while Claude in Chrome drove the browser: its orange glow tints the outermost ~2% of the screen, outside the page image.",
+    "geometry": {
+      "viewport": {
+        "width": 1490,
+        "height": 933
+      },
+      "dpr": 3,
+      "page": {
+        "left": 149,
+        "top": 60,
+        "right": 1341,
+        "bottom": 843
+      }
+    }
+  },
+  {
+    "file": "alice-ch1-loc91-single-white-fontmax.jpg",
+    "book": "Alice in Wonderland (Lewis Carroll, 1865), Kindle B0C6HJ7TCR",
+    "location": 91,
+    "layout": "single",
+    "theme": "white",
+    "columns": 1,
+    "notes": "Largest font size: ten lines fill the page. Taken with the developer capture while Claude in Chrome drove the browser: its orange glow tints the outermost ~2% of the screen, outside the page image.",
+    "geometry": {
+      "viewport": {
+        "width": 1490,
+        "height": 933
+      },
+      "dpr": 3,
+      "page": {
+        "left": 149,
+        "top": 60,
+        "right": 1341,
+        "bottom": 843
+      }
+    }
+  },
+  {
+    "file": "alice-ch1-loc91-single-white-fontmin.jpg",
+    "book": "Alice in Wonderland (Lewis Carroll, 1865), Kindle B0C6HJ7TCR",
+    "location": 91,
+    "layout": "single",
+    "theme": "white",
+    "columns": 1,
+    "notes": "Smallest font size: the illustration fills most of the page, tiny text below it. Taken with the developer capture while Claude in Chrome drove the browser: its orange glow tints the outermost ~2% of the screen, outside the page image.",
+    "geometry": {
+      "viewport": {
+        "width": 1490,
+        "height": 933
+      },
+      "dpr": 3,
+      "page": {
+        "left": 149,
+        "top": 60,
+        "right": 1341,
+        "bottom": 843
+      }
+    }
   }
 ]
