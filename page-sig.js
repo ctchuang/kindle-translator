@@ -9,7 +9,7 @@
 
 const SIG_WIDTH = 240;
 const INK_CONTRAST = 28; // luminance difference from the background that counts as ink
-const SAME_PAGE_DIFF = 0.08; // differing pixels, as a share of the ink
+const SAME_PAGE_DIFF = 0.15; // differing pixels, as a share of the ink
 
 // Fingerprint of a grayscale image ({ width, height, data }, one luminance
 // byte per pixel, already SIG_WIDTH wide) as "WxH:base64 bits".

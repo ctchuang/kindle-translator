@@ -106,7 +106,7 @@ test("same page with a toolbar band changed (progress slider line) is the same p
   // The reader's slider: a 2 px line across most of the top margin band.
   fillRect(withBar, 20, 4, 220, 6, 90);
   const d = pageDiff(pageSignature(page), pageSignature(withBar));
-  assert.ok(d > 0 && d < 0.08, `diff ${d}`);
+  assert.ok(d > 0 && d < 0.15, `diff ${d}`);
   assert.ok(samePage(pageSignature(page), pageSignature(withBar)));
 });
 
@@ -128,7 +128,7 @@ test("different pages are not the same page, by a wide margin", () => {
   for (let i = 0; i < sigs.length; i++)
     for (let j = i + 1; j < sigs.length; j++) {
       const d = pageDiff(sigs[i], sigs[j]);
-      // Several times the 8% threshold, not just over it.
+      // Well over the 15% threshold, not just over it.
       assert.ok(d > 0.4, `pages ${i}/${j} diff ${d}`);
       assert.equal(samePage(sigs[i], sigs[j]), false);
     }
@@ -171,7 +171,7 @@ test("dark theme (light ink on a dark background) works through the median backg
   assert.equal(samePage(pageSignature(dark), pageSignature(textPage(42, { bg: 20, ink: 225 }))), false);
 });
 
-test("threshold: 8% of the ink differing is the same page, just over is not", () => {
+test("threshold: 15% of the ink differing is the same page, just over is not", () => {
   // Exactly 1000 ink pixels in a 40x25 block.
   const page = blank();
   fillRect(page, 50, 50, 90, 75, 30);
@@ -184,9 +184,9 @@ test("threshold: 8% of the ink differing is the same page, just over is not", ()
     for (let i = 0; i < k; i++) img.data[(50 + Math.floor(i / 40)) * SIG_WIDTH + 50 + (i % 40)] = 245;
     return pageSignature(img);
   };
-  assert.equal(pageDiff(base, erase(80)), 0.08);
-  assert.ok(samePage(base, erase(80)));
-  assert.ok(samePage(base, erase(79)));
-  assert.equal(pageDiff(base, erase(81)), 0.081);
-  assert.equal(samePage(base, erase(81)), false);
+  assert.equal(pageDiff(base, erase(150)), 0.15);
+  assert.ok(samePage(base, erase(150)));
+  assert.ok(samePage(base, erase(149)));
+  assert.equal(pageDiff(base, erase(151)), 0.151);
+  assert.equal(samePage(base, erase(151)), false);
 });

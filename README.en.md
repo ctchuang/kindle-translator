@@ -6,7 +6,7 @@ Captures the page currently shown in Kindle Cloud Reader (read.amazon.com and ot
 
 ![Example: a two-page spread of Build a Reasoning Model (From Scratch), with the body text and captions translated in place and figures 1.1 and 1.2 left as they are, and the side panel on the right](docs/example.png)
 
-> **Current version 1.0.0.** Tested on Kindle Cloud Reader's two-page layout: the translation covers the original text about 10 seconds after a page turn. When the overlay doesn't appear, the side panel's status line shows the reason in red, and the log below it shows each step.
+> **Current version 1.0.1.** Tested on Kindle Cloud Reader's two-page layout: the translation covers the original text about 10 seconds after a page turn. When the overlay doesn't appear, the side panel's status line shows the reason in red, and the log below it shows each step.
 
 The extension's interface is in Chinese; the labels quoted below are followed by their English meaning. The target language can be changed in the options page.
 
@@ -64,6 +64,7 @@ The model runs on your GPU through [ONNX Runtime Web](https://github.com/microso
 
 ## Release notes
 
+- **1.0.1**: the same-page threshold is loosened from 8% to 15%, so small changes on screen no longer count as a page turn. The side panel's log has a new 存下截圖 button that saves the current screen as a test screenshot. Retrying a failed model download now restarts its progress from 0.
 - **1.0.0**: the DocLayout-YOLO layout model (WebGPU) now finds paragraphs, headings, captions, figures and tables, replacing the guesswork from indentation, line spacing and word gaps; text inside figures, tables and formulas stays in the original. The model is downloaded on first use (75 MB) and kept in the browser; if it can't run, the extension reports an error instead of falling back. The side panel shows the model's status.
 - **0.6.3**: the default translation mode is now 2. Polished (Haiku translates, Sonnet reviews).
 - **0.6.2**: fixed the translation often flipping back to English, sometimes for good.
