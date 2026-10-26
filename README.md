@@ -99,14 +99,30 @@ Kindle Cloud Reader 的書頁是圖片，沒有可以讀的文字和排版資訊
 - `page-sig.js`：頁面指紋與「是否同一頁」的比對
 - `offscreen.html/js`：在 offscreen 文件裡執行 Tesseract 和 DocLayout-YOLO（service worker 不能開 Web Worker）
 - `layout-model.js`：下載、快取、在 WebGPU 上執行 DocLayout-YOLO
+- `sidepanel.html/js`：側邊欄介面
+- `options.html/js`：設定頁（API key、翻譯方式、effort、目標語言）
 - `vendor/tesseract/`：Tesseract.js 7.0.0、tesseract.js-core 和英文模型（Apache-2.0），全部打包在擴充功能裡，不從 CDN 載入
 - `vendor/onnxruntime/`：ONNX Runtime Web 1.30.0 的 WebGPU 版本（MIT）
 - `vendor/doclayout/`：DocLayout-YOLO 模型的來源、校驗碼與授權（Apache-2.0）；模型本身不在 repo 裡
+- `tests/`：Node 測試（見下一節）
+
+## 開發
+
+測試用 Node 內建的 test runner，不需要安裝任何套件。需要 Node 22 以上。在 repo 根目錄執行：
+
+```bash
+npm test                                                  # 全部
+node --test tests/background-flow.test.js                 # 一個檔案
+node --test --test-name-pattern="cache" "tests/**/*.test.js"  # 名稱符合的測試
+node --test --watch "tests/**/*.test.js"                  # 改程式時自動重跑
+```
+
+測試把擴充功能的檔案原封不動地載入，周圍的 Chrome API、截圖、OCR、Claude API 和 DOM 都換成假的，所以不需要瀏覽器、API key 或網路，跑一次約 15 秒。Tesseract 和版面模型的實際輸出不在測試範圍內，要用真實截圖確認。測試的架構見 [docs/design.md](docs/design.md) 第 9 節。
+
+改動擴充功能後，到 `chrome://extensions` 按擴充功能的重新載入，再重新整理 Kindle 分頁。
 
 ## 致謝
 
 - [DocLayout-YOLO](https://github.com/opendatalab/DocLayout-YOLO)（OpenDataLab）：版面偵測模型。使用 [wybxc/DocLayout-YOLO-DocStructBench-onnx](https://huggingface.co/wybxc/DocLayout-YOLO-DocStructBench-onnx) 的 ONNX 版本（Apache-2.0）。
 - [BabelDOC](https://github.com/funstory-ai/BabelDOC)：模型的選擇、前處理與類別定義參考它的做法。
 - [ONNX Runtime Web](https://github.com/microsoft/onnxruntime)（MIT）與 [Tesseract.js](https://github.com/naptha/tesseract.js)（Apache-2.0）。
-- `sidepanel.html/js`：側邊欄介面
-- `options.html/js`：設定頁（API key、翻譯方式、effort、目標語言）

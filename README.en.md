@@ -101,14 +101,30 @@ The detailed design (in Chinese) is in [docs/design.md](docs/design.md).
 - `page-sig.js`: page fingerprints and the "same page?" comparison
 - `offscreen.html/js`: runs Tesseract and DocLayout-YOLO in an offscreen document (a service worker can't start a Web Worker)
 - `layout-model.js`: downloads, caches and runs DocLayout-YOLO on WebGPU
+- `sidepanel.html/js`: side panel UI
+- `options.html/js`: options page (API key, translation mode, effort, target language)
 - `vendor/tesseract/`: Tesseract.js 7.0.0, tesseract.js-core and the English model (Apache-2.0), all bundled in the extension rather than loaded from a CDN
 - `vendor/onnxruntime/`: the WebGPU build of ONNX Runtime Web 1.30.0 (MIT)
 - `vendor/doclayout/`: source, checksum and license (Apache-2.0) of the DocLayout-YOLO model; the model itself isn't in the repo
+- `tests/`: Node tests (see the next section)
+
+## Development
+
+The tests use Node's built-in test runner and need no packages, only Node 22 or later. From the repo root:
+
+```bash
+npm test                                                  # everything
+node --test tests/background-flow.test.js                 # one file
+node --test --test-name-pattern="cache" "tests/**/*.test.js"  # tests whose name matches
+node --test --watch "tests/**/*.test.js"                  # rerun on every change
+```
+
+The tests load the extension's files unchanged and replace everything around them (Chrome APIs, screenshots, OCR, the Claude API, the DOM) with fakes, so they need no browser, API key or network, and take about 15 seconds. What Tesseract and the layout model actually output isn't covered; check that with real screenshots. How the tests are built is in section 9 of [docs/design.md](docs/design.md) (in Chinese).
+
+After changing the extension, reload it on `chrome://extensions`, then reload the Kindle tab.
 
 ## Credits
 
 - [DocLayout-YOLO](https://github.com/opendatalab/DocLayout-YOLO) (OpenDataLab): the layout detection model, used through the ONNX export [wybxc/DocLayout-YOLO-DocStructBench-onnx](https://huggingface.co/wybxc/DocLayout-YOLO-DocStructBench-onnx) (Apache-2.0).
 - [BabelDOC](https://github.com/funstory-ai/BabelDOC): the choice of model, its preprocessing and class list follow BabelDOC.
 - [ONNX Runtime Web](https://github.com/microsoft/onnxruntime) (MIT) and [Tesseract.js](https://github.com/naptha/tesseract.js) (Apache-2.0).
-- `sidepanel.html/js`: side panel UI
-- `options.html/js`: options page (API key, translation mode, effort, target language)
