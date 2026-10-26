@@ -29,10 +29,10 @@ const lumaOf = (rgb) => {
 };
 
 // Rows of the screenshot holding text, as [first, last] row runs, looking
-// across the part of the width OCR reads.
-function inkRuns(file, ext) {
-  const { width: w, height: h, data } = decodeJpeg(fs.readFileSync(path.join(DIR, file)));
-  const crop = plain(ext.ctx.run("OCR_CROP"));
+// across the part of the width OCR reads, and that part (the crop).
+function inkRuns(fx, ext) {
+  const { width: w, height: h, data } = decodeJpeg(fs.readFileSync(path.join(DIR, fx.file)));
+  const crop = plain(ext.ctx.ocrCrop(fx.geometry));
   const bgAt = (Math.round(h * 0.97) * w + Math.round(w * 0.5)) * 4;
   const bg = luma(data, bgAt);
   const runs = [];
@@ -52,14 +52,17 @@ test("fixtures.json describes exactly the screenshots in the folder", () => {
   assert.deepEqual(FIXTURES.map((f) => f.file).sort(), files);
   for (const f of FIXTURES) {
     assert.ok(["single", "spread"].includes(f.layout), f.file);
+    assert.ok(["white", "sepia", "dark"].includes(f.theme), f.file);
     assert.equal(typeof f.columns, "number", f.file);
+    assert.ok(f.geometry?.page && f.geometry.viewport, `${f.file}: where the book was drawn`);
+    if (f.samePageAs) assert.ok(byFile(f.samePageAs), `${f.file}: ${f.samePageAs} exists`);
   }
 });
 
 for (const fx of FIXTURES) {
   test(`${fx.file}: OCR finds ${fx.columns} column(s)`, async () => {
     const ext = worker();
-    const out = await ext.ctx.ocrPage(fixtureUrl(fx.file));
+    const out = await ext.ctx.ocrPage(fixtureUrl(fx.file), ext.ctx.ocrCrop(fx.geometry));
     assert.equal(out.columns, fx.columns);
     const { rects } = ext.ocr.calls[0];
     assert.equal(rects.length, fx.columns);
@@ -117,25 +120,37 @@ test("a white page: white background, black ink", async () => {
 test("the OCR crop leaves out the progress slider and the page number", () => {
   const ext = worker();
   for (const fx of FIXTURES) {
-    const { runs, h, crop } = inkRuns(fx.file, ext);
-    // The slider and "Page 33 of 398" are the last ink on the screen.
+    const { runs, h, crop } = inkRuns(fx, ext);
+    // The page number / location line (and the slider, when the toolbar
+    // shows) are the last ink on the screen.
     const bottom = runs.filter(([a]) => a > h * 0.9);
     const ui = bottom.filter(([a]) => a > h * crop.y1);
-    assert.ok(ui.length >= 2, `${fx.file}: slider and footer found below the crop`);
+    assert.ok(ui.length >= 1, `${fx.file}: footer found below the crop`);
     assert.ok(bottom.every(([a, b]) => b < h * crop.y1 || a > h * crop.y1), `${fx.file}: nothing straddles the bottom edge`);
   }
 });
 
-test(
-  "the OCR crop doesn't cut through the first line of text",
-  { todo: "OCR_CROP.y0 (6%) cuts through the chapter heading (5.4–6.7% of the height) and, on the spread, the right page's first line (from 5.0%); the title bar ends at about 4.6%" },
-  () => {
-    const ext = worker();
-    for (const fx of FIXTURES) {
-      const { runs, h, crop } = inkRuns(fx.file, ext);
-      const edge = h * crop.y0;
+test("the OCR crop doesn't cut through the first or last line of text", () => {
+  const ext = worker();
+  for (const fx of FIXTURES) {
+    const { runs, h, crop } = inkRuns(fx, ext);
+    for (const edge of [h * crop.y0, h * crop.y1]) {
       const cut = runs.find(([a, b]) => a < edge && b > edge);
-      assert.equal(cut, undefined, `${fx.file}: rows ${cut?.[0]}–${cut?.[1]} straddle the crop's top at row ${Math.round(edge)}`);
+      assert.equal(cut, undefined, `${fx.file}: rows ${cut?.[0]}–${cut?.[1]} straddle the crop edge at row ${Math.round(edge)}`);
     }
+    // Pride and Prejudice's chapter heading (from 5.0–5.4% of the height),
+    // which the old fixed crop cut, is inside.
+    if (fx.topLine) assert.ok(runs.some(([a]) => a > h * crop.y0 && a < h * 0.06), `${fx.file}: heading inside the crop`);
   }
-);
+});
+
+test("the old fixed crop (6% from the top) cut through the heading", () => {
+  // Why ocrCrop exists; the fallback still does this when the page can't
+  // report where the book is drawn.
+  const ext = worker();
+  for (const fx of FIXTURES.filter((f) => f.topLine)) {
+    const { runs, h } = inkRuns({ ...fx, geometry: null }, ext);
+    const edge = h * ext.ctx.run("OCR_CROP.y0");
+    assert.ok(runs.some(([a, b]) => a < edge && b > edge), fx.file);
+  }
+});

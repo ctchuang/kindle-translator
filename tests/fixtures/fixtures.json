@@ -6,7 +6,22 @@
     "layout": "single",
     "theme": "sepia",
     "columns": 1,
-    "notes": "Chapter 7 opening: heading, drop cap, dialogue. Text runs the full width; translation overlay off."
+    "notes": "Chapter 7 opening: heading, drop cap, dialogue. Text runs the full width; translation overlay off.",
+    "geometry": {
+      "viewport": {
+        "width": 2143,
+        "height": 1329
+      },
+      "dpr": 2.2,
+      "page": {
+        "left": 214,
+        "top": 60,
+        "right": 1929,
+        "bottom": 1239
+      },
+      "estimated": "Taken before 存下截圖 saved geometry. Scale from the title bar (62 CSS px = 135 image px, so 2.2: a 2x screen at 110% zoom); page image placed as measured in the DOM of another window: 10–90% of the width, 60 px from the top to 90 px from the bottom."
+    },
+    "topLine": true
   },
   {
     "file": "pride-ch7-p33-spread-white.jpg",
@@ -15,6 +30,21 @@
     "layout": "spread",
     "theme": "white",
     "columns": 2,
-    "notes": "Same place as a two-page spread. The progress slider crosses the gutter; the right page's first line sits in the top 6%."
+    "notes": "Same place as a two-page spread. The progress slider crosses the gutter; the right page's first line sits in the top 6%.",
+    "geometry": {
+      "viewport": {
+        "width": 2143,
+        "height": 1329
+      },
+      "dpr": 2.2,
+      "page": {
+        "left": 214,
+        "top": 60,
+        "right": 1929,
+        "bottom": 1239
+      },
+      "estimated": "Taken before 存下截圖 saved geometry. Scale from the title bar (62 CSS px = 135 image px, so 2.2: a 2x screen at 110% zoom); page image placed as measured in the DOM of another window: 10–90% of the width, 60 px from the top to 90 px from the bottom."
+    },
+    "topLine": true
   }
 ]

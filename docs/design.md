@@ -126,7 +126,10 @@ sequenceDiagram
 
 ### 5.1 裁切與分欄
 
-- 從截圖裁出 `OCR_CROP`（寬 9%～93%、高 6%～94%），比指紋的區域寬，才不會切掉第一行和最後一行。超過 500 萬像素時等比例縮小。
+- 只讀閱讀器畫書頁的地方。Kindle Cloud Reader 把每一頁畫成一張圖片；截圖前 content script 回報這些圖片的範圍（CSS 像素，`pageGeometry`），`ocrCrop` 換算成截圖的比例。例如 1571×974 的視窗裡，書頁圖片在 157～1414 × 60～884，標題列是 0～62，進度列在 869～931，頁碼在更下面，翻頁箭頭在兩側 55～103 和 1469～1517，都落在範圍外。
+- 為什麼不用固定比例：標題列固定 62 CSS 像素高，所以固定的 6% 在高的視窗會切過章名和第一行（`tests/fixtures/` 的兩張截圖就是），在矮的視窗又會包進標題列。換視窗大小、縮放比例或螢幕都一樣適用。
+- 頁面回報不了時（沒有 content script，或閱讀器不是用圖片畫書頁）才退回 `OCR_CROP`（寬 9%～93%、高 6%～94%），執行紀錄會寫「用預設範圍」。
+- 超過 500 萬像素時等比例縮小。
 - `findColumns` 找雙頁中間的空白：在中間 40% 的寬度裡，找每一直行墨水量都很少的最寬區段。允許 3% 的墨水，因為進度列是一條橫跨兩頁的細線。這個區段要超過寬度的 1% 才算頁縫，否則整張當成一欄。
 
 ### 5.2 Tesseract（讀文字）
@@ -227,7 +230,7 @@ API 一律用串流：service worker 的 fetch 超過 30 秒沒有回應會被 C
 - `extension.js`：把以上組起來跑 `background.js`，包括假的 Kindle 分頁（content script）、offscreen OCR 和側邊欄。
 - `dom.js`：給 `content.js`、`sidepanel.js`、`options.js` 用的最小 DOM，含簡單的文字量測（`fitText` 要用）。
 
-`tests/fixtures/` 是真實的 Kindle Cloud Reader 截圖，只用沒有版權的書。用側邊欄執行紀錄的「存下截圖」存下：它跟翻譯時用同一個 `captureVisibleTab` 呼叫和 JPEG 品質，並先隱藏譯文，所以就是 OCR 實際拿到的畫面。每張的條件（書、頁碼、單頁或雙頁、主題、預期欄數）記在 `fixtures.json`。假的 canvas 會解開 JPEG，縮小時取區域平均，所以 `pageSigOf`、`ocrPage` 的裁切與分欄、`finishBlocks` 的取色都用 `background.js` 本身的程式跑在真實畫面上。
+`tests/fixtures/` 是真實的 Kindle Cloud Reader 截圖，只用沒有版權的書。用側邊欄執行紀錄的「存下截圖」存下：它跟翻譯時用同一個 `captureVisibleTab` 呼叫和 JPEG 品質，並先隱藏譯文，所以就是 OCR 實際拿到的畫面。每張的條件（書、頁碼、單頁或雙頁、主題、預期欄數）和書頁圖片的位置記在 `fixtures.json`；「存下截圖」會另外存一個同名的 `.json`，裡面就是這份位置資料。假的 canvas 會解開 JPEG，縮小時取區域平均，所以 `pageSigOf`、`ocrPage` 的裁切與分欄、`finishBlocks` 的取色都用 `background.js` 本身的程式跑在真實畫面上。
 
 涵蓋範圍：
 

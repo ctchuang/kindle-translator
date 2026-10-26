@@ -95,7 +95,12 @@ function onMessage(msg) {
     addPage(msg.text, msg.cached, msg.fallbackModel, msg.summary);
   }
   if (msg.type === "warn") setStatus(msg.text, true);
-  if (msg.type === "screenshot") saveFile(msg.dataUrl, msg.filename);
+  if (msg.type === "screenshot") {
+    saveFile(msg.dataUrl, msg.filename);
+    // Where the book was drawn, for the OCR crop in tests (tests/fixtures).
+    const json = JSON.stringify(msg.info ?? {}, null, 2);
+    saveFile(`data:application/json;charset=utf-8,${encodeURIComponent(json)}`, msg.filename.replace(/\.jpg$/, ".json"));
+  }
   if (msg.type === "error") {
     setStatus(msg.text, true);
     if (msg.needsKey) chrome.runtime.openOptionsPage();

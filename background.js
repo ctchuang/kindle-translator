@@ -55,13 +55,29 @@ const MAX_PIXELS = 3_700_000;
 
 const API_TIMEOUT_MS = 180_000;
 
-// Part of the viewport OCR reads. Wider than CONTENT_CROP, which cuts off the
-// first and last lines of a page in some window shapes, but still clear of the
-// title bar, the footer ("N mins left") and the page arrows. The "Back to"
-// button and progress slider can fall inside; OCR noise filtering drops them. Larger crops are scaled down: Tesseract's time grows with
-// pixels, and body text stays well above the size it needs.
+// Part of the viewport OCR reads when the page can't say where the book is
+// drawn (see ocrCrop). A share of the screen can't fit every window: the title
+// bar is a fixed 62 CSS pixels, so 6% cuts through the first line in a tall
+// window and takes in the title bar in a short one. Larger crops are scaled
+// down: Tesseract's time grows with pixels, and body text stays well above
+// the size it needs.
 const OCR_CROP = { x0: 0.09, y0: 0.06, x1: 0.93, y1: 0.94 };
 const OCR_MAX_PIXELS = 5_000_000;
+
+// The part of the screenshot OCR reads, as fractions: the book page images
+// the reader drew (`geometry` from the content script), which keeps out the
+// title bar, page arrows, bookmark ribbon and progress slider at any window
+// size, zoom or screen; or OCR_CROP when the page couldn't tell.
+function ocrCrop(geometry) {
+  const page = geometry?.page;
+  const { width: vw, height: vh } = geometry?.viewport || {};
+  if (!page || !(vw > 0) || !(vh > 0)) return OCR_CROP;
+  const frac = (v, total) => Math.min(1, Math.max(0, v / total));
+  const crop = { x0: frac(page.left, vw), y0: frac(page.top, vh), x1: frac(page.right, vw), y1: frac(page.bottom, vh) };
+  // Too small to be the book: something else matched.
+  if (crop.x1 - crop.x0 < 0.2 || crop.y1 - crop.y0 < 0.2) return OCR_CROP;
+  return crop;
+}
 
 // Claude sometimes answers a page with a summary instead of a translation,
 // citing copyright, and the same page often translates fine on the next
@@ -196,8 +212,9 @@ chrome.runtime.onMessage.addListener(async (msg, sender) => {
 });
 
 // Development aid: the screen exactly as translation captures it (same
-// call, format and quality, our overlay hidden), for the side panel to save
-// as a test input. The overlay is redrawn afterwards, from the cache.
+// call, format and quality, our overlay hidden), plus where the book is
+// drawn, for the side panel to save as a test input. The overlay is redrawn
+// afterwards, from the cache.
 async function saveScreenshot(port) {
   if (current) {
     log("翻譯進行中，等完成再截圖");
@@ -213,6 +230,7 @@ async function saveScreenshot(port) {
     hidden = !!(await sendToPage(tab.id, { type: "overlayState" }))?.shown;
     if (hidden) await sendToPage(tab.id, { type: "clearOverlay" });
   } catch (_) {} // no content script: there's no overlay to hide either
+  const geometry = await pageGeometry(tab.id);
   let dataUrl;
   try {
     dataUrl = await capture(tab.windowId);
@@ -227,7 +245,7 @@ async function saveScreenshot(port) {
   const filename = `kindle-${asin}-${stamp}.jpg`;
   log(`已截圖：${filename}（${Math.round((dataUrl.length * 3) / 4 / 1024)} KB）`, dataUrl);
   try {
-    port.postMessage({ type: "screenshot", dataUrl, filename });
+    port.postMessage({ type: "screenshot", dataUrl, filename, info: { asin, capturedAt: new Date().toISOString(), ...geometry } });
   } catch (_) {} // the panel closed meanwhile
 }
 
@@ -557,6 +575,8 @@ async function runJob(job, { force, reason }) {
     }
   }
 
+  // Asked right before the capture, so it matches the screenshot's layout.
+  const geometry = settings.engine === "vision" ? null : await pageGeometry(tab.id);
   const dataUrl = await capture(tab.windowId);
   const capturedAt = Date.now();
   log(`截圖完成（${Math.round((dataUrl.length * 3) / 4 / 1024)} KB）`);
@@ -591,7 +611,7 @@ async function runJob(job, { force, reason }) {
   const image = await prepareImage(dataUrl, vision);
   job.page = { sig, windowId: tab.windowId };
   const signal = job.controller.signal;
-  const translate = vision ? visionTranslator(settings, image, signal) : await ocrTranslator(settings, dataUrl, image, signal);
+  const translate = vision ? visionTranslator(settings, image, signal) : await ocrTranslator(settings, dataUrl, image, signal, geometry);
   let reply;
   for (let attempt = 0; ; attempt++) {
     reply = await translate();
@@ -650,6 +670,16 @@ async function runJob(job, { force, reason }) {
       log(`翻譯期間畫面已換頁（差異 ${pct(now, sig)}），這份譯文不畫上去（已存快取）`);
       pending ??= { force: false };
     }
+  }
+}
+
+// Where the book is drawn on the page (content.js pageGeometry), or null
+// when the page can't say.
+async function pageGeometry(tabId) {
+  try {
+    return (await sendToPage(tabId, { type: "geometry" })) ?? null;
+  } catch (_) {
+    return null;
   }
 }
 
@@ -952,12 +982,19 @@ function visionTranslator(settings, image, signal) {
   };
 }
 
-async function ocrTranslator(settings, dataUrl, image, jobSignal) {
+async function ocrTranslator(settings, dataUrl, image, jobSignal, geometry) {
   const plan = qualityOf(settings);
   const textModel = plan.translate;
   const started = Date.now();
+  const crop = ocrCrop(geometry);
+  const pctOf = (v) => Math.round(v * 1000) / 10;
+  log(
+    crop === OCR_CROP
+      ? "OCR 範圍：頁面沒有回報書頁位置，用預設範圍"
+      : `OCR 範圍：書頁圖片（x ${pctOf(crop.x0)}–${pctOf(crop.x1)}%，y ${pctOf(crop.y0)}–${pctOf(crop.y1)}%）`
+  );
   log("OCR 辨識中（Tesseract 讀文字，DocLayout-YOLO 找段落和圖表）…");
-  const ocr = await ocrPage(dataUrl);
+  const ocr = await ocrPage(dataUrl, crop);
   log(`OCR 完成：${seconds(started)} 秒，${ocr.size}，${ocr.columns} 欄，${ocr.blocks.length} 段`);
   log(ocr.layout.text);
   setLayoutState(ocr.layout);
@@ -1094,12 +1131,12 @@ function splitParas(paras, blocks) {
 }
 
 // Text paragraphs of the screenshot with boxes as viewport fractions.
-async function ocrPage(dataUrl) {
+async function ocrPage(dataUrl, crop = OCR_CROP) {
   const bitmap = await createImageBitmap(await (await fetch(dataUrl)).blob());
-  const sx = bitmap.width * OCR_CROP.x0;
-  const sy = bitmap.height * OCR_CROP.y0;
-  const sw = bitmap.width * (OCR_CROP.x1 - OCR_CROP.x0);
-  const sh = bitmap.height * (OCR_CROP.y1 - OCR_CROP.y0);
+  const sx = bitmap.width * crop.x0;
+  const sy = bitmap.height * crop.y0;
+  const sw = bitmap.width * (crop.x1 - crop.x0);
+  const sh = bitmap.height * (crop.y1 - crop.y0);
   const scale = Math.min(1, Math.sqrt(OCR_MAX_PIXELS / (sw * sh)));
   const w = Math.round(sw * scale);
   const h = Math.round(sh * scale);

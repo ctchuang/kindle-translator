@@ -269,7 +269,7 @@ test("the screenshot link asks the worker for a capture", (t) => {
   assert.deepEqual(s.received, [{ type: "captureNow" }]);
 });
 
-test("a screenshot from the worker is saved as a download", (t) => {
+test("a screenshot from the worker is saved as a download, with its geometry", (t) => {
   const s = setup(t);
   const clicked = [];
   const create = s.page.document.createElement.bind(s.page.document);
@@ -278,6 +278,12 @@ test("a screenshot from the worker is saved as a download", (t) => {
     if (tag === "a") el.click = () => clicked.push({ href: el.href, download: el.download });
     return el;
   };
-  s.post({ type: "screenshot", dataUrl: "data:image/jpeg;base64,AAAA", filename: "kindle-B0X-20261026-101500.jpg" });
-  assert.deepEqual(clicked, [{ href: "data:image/jpeg;base64,AAAA", download: "kindle-B0X-20261026-101500.jpg" }]);
+  const info = { asin: "B0X", viewport: { width: 1571, height: 974 }, dpr: 3, page: { left: 157, top: 60, right: 1414, bottom: 884 } };
+  s.post({ type: "screenshot", dataUrl: "data:image/jpeg;base64,AAAA", filename: "kindle-B0X-20261026-101500.jpg", info });
+  assert.equal(clicked.length, 2);
+  assert.deepEqual(clicked[0], { href: "data:image/jpeg;base64,AAAA", download: "kindle-B0X-20261026-101500.jpg" });
+  // Its geometry beside it, for the OCR crop in tests.
+  assert.equal(clicked[1].download, "kindle-B0X-20261026-101500.json");
+  const json = decodeURIComponent(clicked[1].href.slice(clicked[1].href.indexOf(",") + 1));
+  assert.deepEqual(JSON.parse(json), info);
 });

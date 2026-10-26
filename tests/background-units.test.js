@@ -360,3 +360,34 @@ test.describe("capture", () => {
     assert.match(await ext.ctx.capture(1), /^data:image/);
   });
 });
+
+test.describe("ocrCrop", () => {
+  const ctx = worker();
+  const vp = { width: 1571, height: 974 };
+
+  test("the page image's box as fractions of the viewport", () => {
+    // Measured in Kindle Cloud Reader: the page image at 157–1414 × 60–884.
+    const crop = plain(ctx.ocrCrop({ viewport: vp, page: { left: 157, top: 60, right: 1414, bottom: 884 } }));
+    assert.deepEqual(crop, { x0: 157 / 1571, y0: 60 / 974, x1: 1414 / 1571, y1: 884 / 974 });
+  });
+
+  test("clamped to the screen", () => {
+    const crop = plain(ctx.ocrCrop({ viewport: vp, page: { left: -20, top: -5, right: 1700, bottom: 1000 } }));
+    assert.deepEqual(crop, { x0: 0, y0: 0, x1: 1, y1: 1 });
+  });
+
+  test("falls back to OCR_CROP without a usable page box", () => {
+    const fallback = ctx.run("OCR_CROP");
+    for (const g of [
+      undefined,
+      null,
+      { viewport: vp, page: null },
+      { page: { left: 0, top: 0, right: 100, bottom: 100 } },
+      { viewport: { width: 0, height: 0 }, page: { left: 0, top: 0, right: 100, bottom: 100 } },
+      { viewport: vp, page: { left: 100, top: 100, right: 200, bottom: 800 } }, // too narrow
+      { viewport: vp, page: { left: 100, top: 100, right: 1400, bottom: 150 } }, // too short
+    ]) {
+      assert.equal(ctx.ocrCrop(g), fallback, JSON.stringify(g));
+    }
+  });
+});

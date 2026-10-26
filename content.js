@@ -283,6 +283,25 @@ function fitText(box) {
   return lo;
 }
 
+// Where the reader draws the book (one image per page, two side by side on
+// a spread), in CSS pixels, so the background OCRs just that area: a fixed
+// share of the screen cut through the first line in tall windows and took in
+// the title bar in short ones. page is null in a reader mode without images.
+function pageGeometry() {
+  let page = null;
+  for (const el of document.querySelectorAll("img, canvas")) {
+    if (root?.contains(el)) continue;
+    const r = el.getBoundingClientRect();
+    // Skip icons, covers in menus and anything off screen.
+    if (r.width < innerWidth * 0.15 || r.height < innerHeight * 0.3) continue;
+    if (r.right <= 0 || r.bottom <= 0 || r.left >= innerWidth || r.top >= innerHeight) continue;
+    page = page
+      ? { left: Math.min(page.left, r.left), top: Math.min(page.top, r.top), right: Math.max(page.right, r.right), bottom: Math.max(page.bottom, r.bottom) }
+      : { left: r.left, top: r.top, right: r.right, bottom: r.bottom };
+  }
+  return { viewport: { width: innerWidth, height: innerHeight }, dpr: window.devicePixelRatio || 1, page };
+}
+
 if (IS_TOP) {
   chrome.storage.sync.get({ overlay: true }).then((v) => {
     enabled = v.overlay;
@@ -317,6 +336,8 @@ if (IS_TOP) {
       return afterPaint(() => sendResponse({ turn }));
     } else if (msg.type === "debugLog") {
       console.log(`[Kindle 翻譯] ${msg.text}`);
+    } else if (msg.type === "geometry") {
+      sendResponse(pageGeometry());
     } else if (msg.type === "overlayState") {
       sendResponse({ shown: enabled && !!root?.childElementCount });
     } else if (msg.type === "overlay") {

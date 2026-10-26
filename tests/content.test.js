@@ -452,3 +452,46 @@ test("columnRight: the right edge of the widest block in the column", (t) => {
   assert.equal(columnRight(rects, 3), 900);
   assert.equal(columnRight([{ x0: 0, y0: 0, x1: 10, y1: 10 }], 0), 10);
 });
+
+// ---- Where the book is drawn ----
+
+// An element at a fixed box, as the reader places its page images.
+function place(s, tag, [left, top, width, height]) {
+  const el = s.page.document.createElement(tag);
+  Object.assign(el.style, { position: "absolute", left: `${left}px`, top: `${top}px`, width: `${width}px`, height: `${height}px` });
+  s.page.document.documentElement.append(el);
+  return el;
+}
+
+test("geometry reports the book page image in CSS pixels", (t) => {
+  const s = setup(t, { innerWidth: 1571, innerHeight: 974 });
+  // Kindle Cloud Reader's page image, as measured in a 1571×974 window.
+  place(s, "img", [157, 60, 1257, 824]);
+  place(s, "img", [50, 22, 18, 18]); // an icon
+  const [g] = s.send({ type: "geometry" }).replies;
+  assert.deepEqual(g.viewport, { width: 1571, height: 974 });
+  assert.deepEqual(g.page, { left: 157, top: 60, right: 1414, bottom: 884 });
+  assert.equal(typeof g.dpr, "number");
+});
+
+test("geometry covers both pages of a spread drawn as two images", (t) => {
+  const s = setup(t, { innerWidth: 1600, innerHeight: 1000 });
+  place(s, "img", [160, 60, 630, 820]);
+  place(s, "canvas", [810, 60, 630, 820]);
+  assert.deepEqual(s.send({ type: "geometry" }).replies[0].page, { left: 160, top: 60, right: 1440, bottom: 880 });
+});
+
+test("geometry ignores small and off-screen images", (t) => {
+  const s = setup(t, { innerWidth: 1000, innerHeight: 800 });
+  place(s, "img", [100, 100, 100, 600]); // too narrow
+  place(s, "img", [100, 100, 800, 100]); // too short
+  place(s, "img", [1200, 0, 800, 800]); // off screen (the next page, preloaded)
+  assert.equal(s.send({ type: "geometry" }).replies[0].page, null);
+});
+
+test("geometry is null without page images", (t) => {
+  const s = setup(t);
+  const [g] = s.send({ type: "geometry" }).replies;
+  assert.equal(g.page, null);
+  assert.deepEqual(g.viewport, { width: 1000, height: 800 });
+});

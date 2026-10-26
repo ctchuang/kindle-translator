@@ -66,6 +66,9 @@ function startExtension({ settings = {}, session = {}, panel = true, page = "p1"
     enabled: true,
     // Called for the "overlay" message; return a reply to override.
     onOverlay: null,
+    // What content.js's pageGeometry reports: the book page image covering
+    // 10–90% of the 960×600 screen (the synthetic text sits inside it).
+    geometry: { viewport: { width: 960, height: 600 }, dpr: 1, page: { left: 96, top: 60, right: 864, bottom: 540 } },
   };
   chrome._.activeTab = { ...READER_TAB };
   chrome._.screen = () => screenUrl({ ...tab.screen, page: tab.page, overlay: tab.overlay && tab.enabled ? tab.overlay.page : null });
@@ -86,6 +89,8 @@ function startExtension({ settings = {}, session = {}, panel = true, page = "p1"
         tab.overlay = { page: tab.page, blocks: msg.blocks };
         return { shown: true };
       }
+      case "geometry":
+        return tab.geometry;
       case "debugLog":
         return undefined;
     }

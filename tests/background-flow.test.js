@@ -170,14 +170,53 @@ test.describe("OCR engine, polished mode (Haiku + Sonnet review)", () => {
     assert.ok(ext.received.some((m) => m.type === "log" && m.image), "the screenshot is attached to the log");
   });
 
-  test("the OCR request covers the text area of the screenshot only", async () => {
+  test("OCR reads only the book page image the reader drew", async () => {
     const ext = startExtension();
     await ext.translate();
     const { crop } = ext.ocr.calls[0].drawn;
-    const OCR_CROP = plain(ext.ctx.run("OCR_CROP"));
-    assert.equal(crop.sx, 960 * OCR_CROP.x0);
-    assert.equal(crop.sy, 600 * OCR_CROP.y0);
-    assert.ok(Math.abs(crop.sw - 960 * (OCR_CROP.x1 - OCR_CROP.x0)) < 1e-9);
+    // 960×600 screenshot of a 960×600 viewport; the page image is 96–864 × 60–540.
+    assert.deepEqual(crop, { sx: 96, sy: 60, sw: 768, sh: 480 });
+    assert.ok(ext.hasLog(/OCR 範圍：書頁圖片（x 10–90%，y 10–90%）/));
+  });
+
+  test("the page image is mapped through the screen's pixel ratio", async () => {
+    // A 960×600 screenshot of a 480×300 CSS-pixel viewport (2× screen).
+    const ext = startExtension();
+    ext.tab.geometry = { viewport: { width: 480, height: 300 }, dpr: 2, page: { left: 48, top: 15, right: 432, bottom: 285 } };
+    await ext.translate();
+    assert.deepEqual(ext.ocr.calls[0].drawn.crop, { sx: 96, sy: 30, sw: 768, sh: 540 });
+  });
+
+  test("without the page image's position, OCR falls back to a fixed share of the screen", async () => {
+    for (const geometry of [null, { viewport: { width: 960, height: 600 }, dpr: 1, page: null }, { viewport: { width: 960, height: 600 }, page: { left: 0, top: 0, right: 50, bottom: 50 } }]) {
+      const ext = startExtension();
+      ext.tab.geometry = geometry;
+      await ext.translate();
+      const { crop } = ext.ocr.calls[0].drawn;
+      const OCR_CROP = plain(ext.ctx.run("OCR_CROP"));
+      assert.equal(crop.sx, 960 * OCR_CROP.x0);
+      assert.equal(crop.sy, 600 * OCR_CROP.y0);
+      assert.ok(Math.abs(crop.sw - 960 * (OCR_CROP.x1 - OCR_CROP.x0)) < 1e-9);
+      assert.ok(ext.hasLog(/OCR 範圍：頁面沒有回報書頁位置，用預設範圍/));
+    }
+  });
+
+  test("a page that can't answer still gets translated, with the fixed crop", async () => {
+    const ext = startExtension();
+    const handler = ext.chrome._.tabMessageHandler;
+    ext.chrome._.tabMessageHandler = (id, msg, o) => {
+      if (msg.type === "geometry") throw new Error("Frame removed");
+      return handler(id, msg, o);
+    };
+    await ext.translate();
+    assert.ok(ext.hasLog(/用預設範圍/));
+    assert.equal(ext.overlaysSent().length, 1);
+  });
+
+  test("the vision engine doesn't ask for the page image", async () => {
+    const ext = startExtension({ settings: { engine: "vision" } });
+    await ext.translate();
+    assert.ok(!ext.chrome._.tabMessages.some((m) => m.msg.type === "geometry"));
   });
 
   test("the offscreen document is created once", async () => {
@@ -788,6 +827,10 @@ test.describe("saving a screenshot for tests", () => {
     await shoot(ext);
     const [shot] = ext.msgs("screenshot");
     assert.match(shot.filename, /^kindle-B0TESTBOOK-\d{8}-\d{6}\.jpg$/);
+    assert.equal(shot.info.asin, "B0TESTBOOK");
+    assert.deepEqual(shot.info.page, ext.tab.geometry.page, "where the book was drawn, for the OCR crop");
+    assert.deepEqual(shot.info.viewport, ext.tab.geometry.viewport);
+    assert.match(shot.info.capturedAt, /^\d{4}-\d\d-\d\dT/);
     assert.deepEqual(plain(parseScreenUrl(shot.dataUrl)).overlay, null);
     assert.ok(ext.received.some((m) => m.type === "log" && /^已截圖：kindle-B0TESTBOOK-/.test(m.text) && m.image === shot.dataUrl));
   });
