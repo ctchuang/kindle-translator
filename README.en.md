@@ -6,7 +6,7 @@ Captures the page currently shown in Kindle Cloud Reader (read.amazon.com and ot
 
 ![Example: a two-page spread of Build a Reasoning Model (From Scratch), with the body text and captions translated in place and figures 1.1 and 1.2 left as they are, and the side panel on the right](docs/example.png)
 
-> **Current version 1.0.1.** Tested on Kindle Cloud Reader's two-page layout: the translation covers the original text about 10 seconds after a page turn. When the overlay doesn't appear, the side panel's status line shows the reason in red, and the log below it shows each step.
+> Tested on Kindle Cloud Reader's two-page layout: the translation covers the original text about 10 seconds after a page turn. When the overlay doesn't appear, the side panel's status line shows the reason in red, and the log below it shows each step.
 
 The extension's interface is in Chinese; the labels quoted below are followed by their English meaning. The target language can be changed in the options page.
 
