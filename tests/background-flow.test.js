@@ -213,10 +213,12 @@ test.describe("OCR engine, polished mode (Haiku + Sonnet review)", () => {
     assert.equal(ext.overlaysSent().length, 1);
   });
 
-  test("the vision engine doesn't ask for the page image", async () => {
+  test("the vision engine asks for the page image only for the fingerprint", async () => {
     const ext = startExtension({ settings: { engine: "vision" } });
     await ext.translate();
-    assert.ok(!ext.chrome._.tabMessages.some((m) => m.msg.type === "geometry"));
+    assert.ok(ext.chrome._.tabMessages.some((m) => m.msg.type === "geometry"));
+    assert.equal(ext.ocr.calls.length, 0);
+    assert.equal(ext.claude.calls[0].body.messages[0].content[0].type, "image", "still the whole screenshot");
   });
 
   test("the offscreen document is created once", async () => {
@@ -500,6 +502,29 @@ test.describe("page turns", () => {
     assert.ok(ext.hasLog(/畫面沒變（譯文還在，差異 0%），略過/));
     assert.equal(ext.chrome._.captures, captures + 1, "one capture to compare, no clearing");
     assert.ok(!ext.chrome._.tabMessages.slice(-3).some((m) => m.msg.type === "clearOverlay"));
+  });
+
+  test("a re-check while the page can't report the book's position still matches", async () => {
+    // The fingerprint reuses the area last measured for this window size.
+    const ext = startExtension();
+    await ext.translate();
+    ext.tab.geometry = null;
+    await ext.turnTo(undefined, "dom");
+    await ext.idle();
+    assert.ok(ext.hasLog(/畫面沒變（譯文還在，差異 0%），略過/));
+  });
+
+  test("the title bar sliding in doesn't look like a page turn in a short window", async () => {
+    // A 62 px title bar in a 600 px window reaches past the old fixed 8%.
+    const ext = startExtension({ screen: { toolbar: 0.1 } });
+    ext.tab.geometry = { viewport: { width: 960, height: 600 }, dpr: 1, page: { left: 96, top: 62, right: 864, bottom: 540 } };
+    await ext.translate();
+    const calls = ext.claude.calls.length;
+    ext.tab.screen.toolbar = false; // the toolbar hides
+    await ext.turnTo(undefined, "dom");
+    await ext.idle();
+    assert.ok(ext.hasLog(/畫面沒變（譯文還在，差異 0%），略過/));
+    assert.equal(ext.claude.calls.length, calls);
   });
 
   test("reader churn that did change the page (slider, table of contents) translates it", async () => {

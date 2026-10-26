@@ -64,19 +64,30 @@ const API_TIMEOUT_MS = 180_000;
 const OCR_CROP = { x0: 0.09, y0: 0.06, x1: 0.93, y1: 0.94 };
 const OCR_MAX_PIXELS = 5_000_000;
 
-// The part of the screenshot OCR reads, as fractions: the book page images
-// the reader drew (`geometry` from the content script), which keeps out the
-// title bar, page arrows, bookmark ribbon and progress slider at any window
-// size, zoom or screen; or OCR_CROP when the page couldn't tell.
-function ocrCrop(geometry) {
+// The book page images the reader drew (`geometry` from the content script)
+// as fractions of the screenshot, shrunk by `inset` CSS pixels on each side;
+// null when the page couldn't tell. Unlike a fixed share of the screen, this
+// keeps out the title bar, page arrows, bookmark ribbon and progress slider
+// at any window size, zoom or screen.
+function pageCrop(geometry, inset = 0) {
   const page = geometry?.page;
   const { width: vw, height: vh } = geometry?.viewport || {};
-  if (!page || !(vw > 0) || !(vh > 0)) return OCR_CROP;
+  if (!page || !(vw > 0) || !(vh > 0)) return null;
   const frac = (v, total) => Math.min(1, Math.max(0, v / total));
-  const crop = { x0: frac(page.left, vw), y0: frac(page.top, vh), x1: frac(page.right, vw), y1: frac(page.bottom, vh) };
+  const crop = {
+    x0: frac(page.left + inset, vw),
+    y0: frac(page.top + inset, vh),
+    x1: frac(page.right - inset, vw),
+    y1: frac(page.bottom - inset, vh),
+  };
   // Too small to be the book: something else matched.
-  if (crop.x1 - crop.x0 < 0.2 || crop.y1 - crop.y0 < 0.2) return OCR_CROP;
+  if (crop.x1 - crop.x0 < 0.2 || crop.y1 - crop.y0 < 0.2) return null;
   return crop;
+}
+
+// The part of the screenshot OCR reads.
+function ocrCrop(geometry) {
+  return pageCrop(geometry) ?? OCR_CROP;
 }
 
 // Claude sometimes answers a page with a summary instead of a translation,
@@ -93,7 +104,7 @@ let pending = null; // { force, reason } of a request waiting for the current on
 // and posts results. When the page changes under it, it isn't cancelled but
 // moved to the background: it finishes, fills the cache, and turning back to
 // that page is then instant. Each job: { controller (cancels its OCR wait and
-// API calls), page: { sig, windowId } once captured, detached, done (resolves
+// API calls), page: { sig, windowId, tabId } once captured, detached, done (resolves
 // to the blocks it cached, or null) }.
 let current = null;
 const background = new Set();
@@ -203,7 +214,7 @@ chrome.runtime.onMessage.addListener(async (msg, sender) => {
   // Only translate when the panel is open, so we don't spend tokens silently.
   if (!(await panelOpen()) || !sender.tab?.active) return;
   logTabId = sender.tab.id;
-  if (!autoTranslate) return refreshButtonState(sender.tab.windowId);
+  if (!autoTranslate) return refreshButtonState(sender.tab);
   // Key, click, wheel and window resize hide the overlay on the page at once;
   // "dom" leaves it up until the check below.
   const cleared = msg.reason !== "dom" ? "，書頁上的譯文已先清掉" : "";
@@ -260,12 +271,12 @@ async function panelOpen() {
 
 // Without auto-translate nothing else re-checks the screen after a page turn,
 // so do it here to keep the button label honest.
-async function refreshButtonState(windowId) {
+async function refreshButtonState(tab) {
   if (current) return;
   try {
     const shown = await getShownSig();
     if (!shown) return;
-    const now = await captureSig(windowId);
+    const now = await captureSig(tab);
     const { overlaySig } = await chrome.storage.session.get("overlaySig");
     if (!samePage(now, shown) && !samePage(now, overlaySig)) await setShownSig(null);
   } catch (_) {}
@@ -323,10 +334,30 @@ async function getSettings() {
   return { ...DEFAULTS, ...(await chrome.storage.sync.get(Object.keys(DEFAULTS))) };
 }
 
-// Part of the viewport that holds the book text, as fractions. Leaves out the
+// Part of the viewport the fingerprint looks at before the page has ever said
+// where the book is drawn (see sigCrop), as fractions. Meant to leave out the
 // title bar, the progress bar / "Learning reading speed…" footer, the page
-// arrows (which get a focus ring after a key press) and the bookmark ribbon.
+// arrows (which get a focus ring after a key press) and the bookmark ribbon,
+// but the title bar is a fixed 62 CSS pixels, so in a short window it reaches
+// in, and its sliding in and out looked like a page turn.
 const CONTENT_CROP = { x0: 0.09, y0: 0.08, x1: 0.91, y1: 0.91 };
+
+// The page image overlaps the title bar by a couple of pixels; keep that edge
+// out of the fingerprint.
+const SIG_INSET_PX = 4;
+
+// The fingerprint's area: the book page images, or, when the page can't say
+// this time, the area last measured for a screenshot of this size, so the same
+// page keeps the same fingerprint; CONTENT_CROP until anything is measured.
+// Kept in session storage, like the fingerprints themselves.
+async function sigCrop(geometry, bitmap) {
+  const key = `sigCrop:${bitmap.width}x${bitmap.height}`;
+  const stored = (await chrome.storage.session.get(key))[key];
+  const crop = pageCrop(geometry, SIG_INSET_PX);
+  if (!crop) return stored ?? CONTENT_CROP;
+  if (JSON.stringify(crop) !== JSON.stringify(stored)) await chrome.storage.session.set({ [key]: crop });
+  return crop;
+}
 
 // Identifies the page by its text area only, so reader-UI changes don't make
 // the same page look new (cache miss, paid retranslation) and a real page
@@ -334,12 +365,13 @@ const CONTENT_CROP = { x0: 0.09, y0: 0.08, x1: 0.91, y1: 0.91 };
 // contents). A coarse fingerprint compared with samePage (page-sig.js), not
 // an exact hash: toolbar animation, hover effects and JPEG noise change a few
 // pixels of the same page.
-async function pageSigOf(dataUrl) {
+async function pageSigOf(dataUrl, geometry) {
   const bitmap = await createImageBitmap(await (await fetch(dataUrl)).blob());
-  const sx = bitmap.width * CONTENT_CROP.x0;
-  const sy = bitmap.height * CONTENT_CROP.y0;
-  const sw = bitmap.width * (CONTENT_CROP.x1 - CONTENT_CROP.x0);
-  const sh = bitmap.height * (CONTENT_CROP.y1 - CONTENT_CROP.y0);
+  const crop = await sigCrop(geometry, bitmap);
+  const sx = bitmap.width * crop.x0;
+  const sy = bitmap.height * crop.y0;
+  const sw = bitmap.width * (crop.x1 - crop.x0);
+  const sh = bitmap.height * (crop.y1 - crop.y0);
   const w = SIG_WIDTH;
   const h = Math.round((w * sh) / sw);
   const ctx = new OffscreenCanvas(w, h).getContext("2d");
@@ -373,8 +405,10 @@ function capture(windowId) {
   return run;
 }
 
-async function captureSig(windowId) {
-  return pageSigOf(await capture(windowId));
+// Fingerprint of what `tab` ({ id, windowId }) shows now.
+async function captureSig(tab) {
+  const geometry = await pageGeometry(tab.id);
+  return pageSigOf(await capture(tab.windowId), geometry);
 }
 
 // While a request runs, any page-turn signal (even plain DOM churn, or an
@@ -408,7 +442,7 @@ async function checkPageOnce() {
   if (!page) return;
   let now;
   try {
-    now = await captureSig(page.windowId);
+    now = await captureSig({ id: page.tabId, windowId: page.windowId });
   } catch (_) {
     return; // tab not capturable right now (e.g. another tab is in front)
   }
@@ -457,12 +491,12 @@ function release(job) {
 
 // Turning back to a page whose translation is still running in the
 // background: wait for it rather than paying for the page twice.
-async function backgroundResult(job, sig, windowId) {
+async function backgroundResult(job, sig, tab) {
   const running = [...background].find((j) => j.page && samePage(j.page.sig, sig));
   if (!running) return undefined;
   log("這一頁還在背景翻譯，等它完成");
   broadcast({ type: "working" });
-  job.page = { sig, windowId }; // so turning away again releases the wait
+  job.page = { sig, windowId: tab.windowId, tabId: tab.id }; // so turning away again releases the wait
   job.waiting = true;
   try {
     return (await running.done) ?? undefined;
@@ -543,7 +577,7 @@ async function runJob(job, { force, reason }) {
     const { overlaySig } = await chrome.storage.session.get("overlaySig");
     try {
       const shown = (await sendToPage(tab.id, { type: "overlayState" }))?.shown;
-      const now = overlaySig && shown ? await captureSig(tab.windowId) : null;
+      const now = overlaySig && shown ? await captureSig(tab) : null;
       if (now && samePage(now, overlaySig)) {
         log(`畫面沒變（譯文還在，差異 ${pct(now, overlaySig)}），略過`);
         return;
@@ -576,11 +610,11 @@ async function runJob(job, { force, reason }) {
   }
 
   // Asked right before the capture, so it matches the screenshot's layout.
-  const geometry = settings.engine === "vision" ? null : await pageGeometry(tab.id);
+  const geometry = await pageGeometry(tab.id);
   const dataUrl = await capture(tab.windowId);
   const capturedAt = Date.now();
   log(`截圖完成（${Math.round((dataUrl.length * 3) / 4 / 1024)} KB）`);
-  const sig = await pageSigOf(dataUrl);
+  const sig = await pageSigOf(dataUrl, geometry);
   const lastSig = await swapLastSig(sig);
   const sameAsLast = samePage(lastSig, sig);
   if (lastSig) log(`跟上一次截圖的差異 ${pct(lastSig, sig)}`);
@@ -589,7 +623,7 @@ async function runJob(job, { force, reason }) {
   // very screen; pressing it then means "ask Claude again", not "use cache".
   const retranslate = force && samePage(sig, await getShownSig());
   if (retranslate) log(`畫面沒變（差異 ${pct(sig, await getShownSig())}）：重新翻譯本頁，不使用快取`);
-  const cached = retranslate ? null : (await cacheGet(sig)) ?? (await backgroundResult(job, sig, tab.windowId));
+  const cached = retranslate ? null : (await cacheGet(sig)) ?? (await backgroundResult(job, sig, tab));
   if (job.detached) return; // turned away while waiting for the background job
   if (cached) {
     const blocks = cached;
@@ -609,7 +643,7 @@ async function runJob(job, { force, reason }) {
   await setShownSig(null);
   const vision = settings.engine === "vision";
   const image = await prepareImage(dataUrl, vision);
-  job.page = { sig, windowId: tab.windowId };
+  job.page = { sig, windowId: tab.windowId, tabId: tab.id };
   const signal = job.controller.signal;
   const translate = vision ? visionTranslator(settings, image, signal) : await ocrTranslator(settings, dataUrl, image, signal, geometry);
   let reply;
@@ -660,7 +694,7 @@ async function runJob(job, { force, reason }) {
     // caught; never draw one page's translation over another.
     let now = sig;
     try {
-      now = await captureSig(tab.windowId);
+      now = await captureSig(tab);
     } catch (_) {}
     if (samePage(now, sig)) {
       if (now !== sig) log(`畫上譯文前再確認：同一頁（差異 ${pct(now, sig)}）`);
@@ -724,7 +758,7 @@ async function showOnPage(tabId, blocks, turn) {
 async function rememberOverlaySig(tabId) {
   try {
     const { windowId } = await chrome.tabs.get(tabId);
-    const sig = await captureSig(windowId);
+    const sig = await captureSig({ id: tabId, windowId });
     if ((await sendToPage(tabId, { type: "overlayState" }))?.shown) await chrome.storage.session.set({ overlaySig: sig });
   } catch (_) {}
 }

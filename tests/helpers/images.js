@@ -8,8 +8,8 @@
 // - spread: two columns with a gutter (a two-page spread).
 // - overlay: a string; the translation overlay drawn over the text area
 //   (different "words"), as after showOnPage.
-// - toolbar: the reader's title bar showing (outside the area the
-//   fingerprint looks at).
+// - toolbar: the reader's title bar showing; true for one 6% of the height
+//   tall, or its height as a fraction (a short window: 62 px of 600 is 0.1).
 
 const THEMES = {
   white: { bg: [255, 255, 255], ink: [20, 20, 20] },
@@ -83,7 +83,8 @@ function renderer(spec) {
   return (x, y) => {
     const fx = x / spec.w;
     const fy = y / spec.h;
-    if (spec.toolbar && fy < 0.06) return fx > 0.3 && fx < 0.7 && fy > 0.02 && fy < 0.04 ? ink : [128, 128, 128];
+    const bar = spec.toolbar === true ? 0.06 : spec.toolbar || 0;
+    if (fy < bar) return fx > 0.3 && fx < 0.7 && fy > bar / 3 && fy < (bar * 2) / 3 ? ink : [128, 128, 128];
     if (fy < TEXT.y0 || fy >= TEXT.y1) return bg;
     const pos = (fy - TEXT.y0) / LINE_PITCH;
     const line = Math.floor(pos);

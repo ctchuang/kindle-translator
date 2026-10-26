@@ -80,8 +80,8 @@ test("the same screenshot fingerprints identically", async () => {
   const ext = worker();
   for (const fx of FIXTURES) {
     const url = fixtureUrl(fx.file);
-    const a = await ext.ctx.pageSigOf(url);
-    const b = await ext.ctx.pageSigOf(url);
+    const a = await ext.ctx.pageSigOf(url, fx.geometry);
+    const b = await ext.ctx.pageSigOf(url, fx.geometry);
     assert.equal(ext.ctx.pageDiff(a, b), 0, fx.file);
   }
 });
@@ -89,8 +89,8 @@ test("the same screenshot fingerprints identically", async () => {
 test("the same page laid out as one column and as a spread are different screens", async () => {
   // Otherwise resizing the window would redraw the old layout's boxes.
   const ext = worker();
-  const a = await ext.ctx.pageSigOf(fixtureUrl("pride-ch7-p33-single-sepia.jpg"));
-  const b = await ext.ctx.pageSigOf(fixtureUrl("pride-ch7-p33-spread-white.jpg"));
+  const a = await ext.ctx.pageSigOf(fixtureUrl("pride-ch7-p33-single-sepia.jpg"), byFile("pride-ch7-p33-single-sepia.jpg").geometry);
+  const b = await ext.ctx.pageSigOf(fixtureUrl("pride-ch7-p33-spread-white.jpg"), byFile("pride-ch7-p33-spread-white.jpg").geometry);
   assert.equal(ext.ctx.samePage(a, b), false);
   assert.ok(ext.ctx.pageDiff(a, b) > 0.5, `diff ${ext.ctx.pageDiff(a, b)}`);
 });

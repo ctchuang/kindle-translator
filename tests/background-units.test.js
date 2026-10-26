@@ -391,3 +391,46 @@ test.describe("ocrCrop", () => {
     }
   });
 });
+
+test.describe("fingerprint area", () => {
+  const geometry = { viewport: { width: 960, height: 600 }, dpr: 1, page: { left: 96, top: 60, right: 864, bottom: 540 } };
+  const dims = (sig) => sig.split(":")[0];
+
+  test("follows the book page image, inset a few pixels", async () => {
+    const ext = startExtension({ panel: false });
+    const sig = await ext.ctx.pageSigOf(screenUrl({}), geometry);
+    const inset = ext.ctx.run("SIG_INSET_PX");
+    const w = 768 - 2 * inset;
+    const h = 480 - 2 * inset;
+    assert.equal(dims(sig), `240x${Math.round((240 * h) / w)}`);
+  });
+
+  test("uses CONTENT_CROP before the page has ever said where the book is", async () => {
+    const ext = startExtension({ panel: false });
+    const C = plain(ext.ctx.run("CONTENT_CROP"));
+    const sig = await ext.ctx.pageSigOf(screenUrl({}), null);
+    assert.equal(dims(sig), `240x${Math.round((240 * 600 * (C.y1 - C.y0)) / (960 * (C.x1 - C.x0)))}`);
+  });
+
+  test("reuses the last measured area for the same screenshot size", async () => {
+    const ext = startExtension({ panel: false });
+    const measured = await ext.ctx.pageSigOf(screenUrl({}), geometry);
+    const unmeasured = await ext.ctx.pageSigOf(screenUrl({}), null);
+    assert.equal(unmeasured, measured);
+    // Another window size: nothing measured for it yet.
+    const other = await ext.ctx.pageSigOf(screenUrl({ w: 800, h: 600 }), null);
+    assert.notEqual(dims(other), dims(measured));
+  });
+
+  test("leaves out a title bar the fixed area takes in", async () => {
+    const ext = startExtension({ panel: false });
+    const g = { viewport: { width: 960, height: 600 }, dpr: 1, page: { left: 96, top: 62, right: 864, bottom: 540 } };
+    const shown = await ext.ctx.pageSigOf(screenUrl({ toolbar: 0.1 }), g);
+    const hidden = await ext.ctx.pageSigOf(screenUrl({ toolbar: false }), g);
+    assert.equal(ext.ctx.pageDiff(shown, hidden), 0);
+    const fresh = startExtension({ panel: false });
+    const a = await fresh.ctx.pageSigOf(screenUrl({ toolbar: 0.1 }), null);
+    const b = await fresh.ctx.pageSigOf(screenUrl({ toolbar: false }), null);
+    assert.ok(fresh.ctx.pageDiff(a, b) > 0, "the old fixed area sees the title bar");
+  });
+});

@@ -299,6 +299,9 @@ function pageGeometry() {
       ? { left: Math.min(page.left, r.left), top: Math.min(page.top, r.top), right: Math.max(page.right, r.right), bottom: Math.max(page.bottom, r.bottom) }
       : { left: r.left, top: r.top, right: r.right, bottom: r.bottom };
   }
+  // Whole pixels: the fingerprint's size follows this box, and a sub-pixel
+  // wobble between two reports must not make the same page look different.
+  if (page) for (const k of Object.keys(page)) page[k] = Math.round(page[k]);
   return { viewport: { width: innerWidth, height: innerHeight }, dpr: window.devicePixelRatio || 1, page };
 }
 

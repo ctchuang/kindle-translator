@@ -481,6 +481,12 @@ test("geometry covers both pages of a spread drawn as two images", (t) => {
   assert.deepEqual(s.send({ type: "geometry" }).replies[0].page, { left: 160, top: 60, right: 1440, bottom: 880 });
 });
 
+test("geometry rounds to whole pixels", (t) => {
+  const s = setup(t, { innerWidth: 1000, innerHeight: 800 });
+  place(s, "img", [100.4, 59.6, 800.3, 700.2]);
+  assert.deepEqual(s.send({ type: "geometry" }).replies[0].page, { left: 100, top: 60, right: 901, bottom: 760 });
+});
+
 test("geometry ignores small and off-screen images", (t) => {
   const s = setup(t, { innerWidth: 1000, innerHeight: 800 });
   place(s, "img", [100, 100, 100, 600]); // too narrow
