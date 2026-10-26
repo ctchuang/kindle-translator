@@ -34,6 +34,13 @@ function findColumns(img) {
   // A real gutter is wider than a word gap; ~1% of the width rules out
   // spaces and rivers in justified text.
   if (!best || best[1] - best[0] < w * 0.01) return [[0, w]];
+  // A gutter separates two pages of ink; with nothing on one side (a blank
+  // page, or a spread whose other page is empty) there is only one column.
+  const inked = (x0, x1) => {
+    for (let x = x0; x < x1; x++) if (ink[x] > tolerance) return true;
+    return false;
+  };
+  if (!inked(0, best[0]) || !inked(best[1], w)) return [[0, w]];
   return [
     [0, best[0]],
     [best[1], w],

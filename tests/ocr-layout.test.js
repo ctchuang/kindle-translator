@@ -59,13 +59,21 @@ test("findColumns: a single page is one column", () => {
   assert.deepEqual(findColumns(page({ blocks: [[60, 940]], seed: 2 })), [[0, W]]);
 });
 
-test(
-  "findColumns: a blank page is one column",
-  { todo: "the whole middle 40% is one blank run, so an empty page splits into [0, 0.3w] and [0.7w, w]: two OCR and layout passes over nothing" },
-  () => {
-    assert.deepEqual(findColumns(image(245)), [[0, W]]);
-  }
-);
+test("findColumns: a blank page is one column", () => {
+  assert.deepEqual(findColumns(image(245)), [[0, W]]);
+});
+
+test("findColumns: a spread with one blank page is one column", () => {
+  assert.deepEqual(findColumns(page({ blocks: [[40, 470]] })), [[0, W]]);
+  assert.deepEqual(findColumns(page({ blocks: [[530, 960]] })), [[0, W]]);
+});
+
+test("findColumns: a gutter wider than the middle 40% still splits", () => {
+  assert.deepEqual(findColumns(page({ blocks: [[40, 250], [750, 960]] })), [
+    [0, 300],
+    [700, W],
+  ]);
+});
 
 test("findColumns: a two-page spread splits at the blank gutter", () => {
   const img = page({ blocks: [[40, 470], [530, 960]] });
