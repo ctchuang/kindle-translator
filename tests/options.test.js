@@ -91,3 +91,21 @@ test("the saved note clears itself", async (t) => {
   await save(s);
   await waitFor(() => s.$("saved").textContent === "", { what: "note cleared" });
 });
+
+test("the developer switch is off by default and saved at once, on this computer only", async (t) => {
+  const s = await setup(t);
+  await waitFor(() => s.$("devCapture").checked === false);
+  s.$("devCapture").checked = true;
+  s.page.fire(s.$("devCapture"), "change");
+  await waitFor(() => s.chrome.storage.local.data.get("devCapture") === true, { what: "saved to local storage" });
+  assert.equal(s.chrome.storage.sync.data.has("devCapture"), false);
+});
+
+test("the developer section opens when the switch is on", async (t) => {
+  const chrome = createChrome();
+  await chrome.storage.local.set({ devCapture: true });
+  const page = loadPage(["options.js"], { chrome, html: "options.html" });
+  t.after(() => page.close());
+  await waitFor(() => page.$("devCapture").checked === true, { what: "switch loaded" });
+  assert.equal(page.$("developer").open, true);
+});

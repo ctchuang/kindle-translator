@@ -122,6 +122,8 @@ node --test --watch "tests/**/*.test.js"                  # rerun on every chang
 
 The tests load the extension's files unchanged and replace everything around them (Chrome APIs, screenshots, OCR, the Claude API, the DOM) with fakes, so they need no browser, API key or network, and take about 15 seconds. `tests/fixtures/` holds a few real screenshots of public-domain books (saved with 存下截圖 in the side panel's log), used to test the fingerprint, crop, columns and colors. What Tesseract and the layout model actually output isn't covered; check that with real screenshots. How the tests are built is in section 9 of [docs/design.md](docs/design.md) (in Chinese).
 
+How to capture test screenshots in bulk is also in section 9 of docs/design.md.
+
 After changing the extension, reload it on `chrome://extensions`, then reload the Kindle tab.
 
 ## Credits

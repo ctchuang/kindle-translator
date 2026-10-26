@@ -11,6 +11,7 @@ window.__kindleTranslatorLoaded = true;
 
 const IS_TOP = window.top === window;
 const TURN_MSG = "kindle-translator-turn";
+const DEV_CAPTURE = "kindle-translator-dev-capture";
 
 let timer = null;
 let pendingReason = null;
@@ -318,6 +319,13 @@ if (IS_TOP) {
 
   window.addEventListener("message", (e) => {
     if (e.data?.type === TURN_MSG) notify(e.data.reason || "frame");
+    // A test tool driving this page asks for a test screenshot (the
+    // background refuses unless the options page's developer switch is on).
+    if (e.data?.type === DEV_CAPTURE && e.source === window) {
+      const { id, name } = e.data;
+      const reply = (r) => window.postMessage({ type: `${DEV_CAPTURE}-result`, id, ...r }, location.origin);
+      chrome.runtime.sendMessage({ type: "devCapture", name }).then(reply, (err) => reply({ ok: false, error: String(err?.message || err) }));
+    }
   });
 
   // Reply once the change is on screen: the background takes a screenshot

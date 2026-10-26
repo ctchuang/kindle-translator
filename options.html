@@ -11,6 +11,10 @@
     .hint { color:#888; font-size:12px; margin-top:4px; }
     button { margin-top:20px; background:#146e78; color:#fff; border:0; border-radius:6px; padding:8px 18px; font-size:14px; cursor:pointer; }
     #saved { margin-left:10px; color:#146e78; }
+    details { margin-top:32px; }
+    summary { cursor:pointer; color:#888; }
+    label.check { font-weight:400; display:flex; gap:8px; align-items:center; }
+    label.check input { width:auto; }
   </style>
 </head>
 <body>
@@ -42,6 +46,12 @@
   <div class="hint">例如「繁體中文（台灣用語）」、「繁體中文（香港用語）」。</div>
 
   <button id="save">儲存</button><span id="saved"></span>
+
+  <details id="developer">
+    <summary>開發者</summary>
+    <label class="check"><input type="checkbox" id="devCapture" /> 允許測試工具觸發「存下截圖」</label>
+    <div class="hint">讓操作 Kindle 頁面的測試工具要求截圖，截圖直接送到這台電腦上的接收程式（127.0.0.1:8765，<code>tests/tools/receive-fixtures.js</code>），用來製作測試用的截圖。頁面只會知道成功或失敗，拿不到截圖。只存在這台電腦，立即生效；不做開發請保持關閉。</div>
+  </details>
 
   <script src="options.js"></script>
 </body>

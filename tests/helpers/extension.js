@@ -50,9 +50,20 @@ function startExtension({ settings = {}, session = {}, panel = true, page = "p1"
   const chrome = createChrome({ sync: { apiKey: "sk-ant-test", ...settings }, session, asyncPorts: true });
   const claude = createClaude(handler);
   const images = imageGlobals();
+  // The test-screenshot receiver (tests/tools/receive-fixtures.js).
+  const received_shots = [];
+  const receiver = async (url, init) => {
+    received_shots.push({ url, body: JSON.parse(init.body) });
+    return { ok: ext.receiverStatus === 200, status: ext.receiverStatus };
+  };
   const ctx = loadScripts(["background.js"], {
     chrome,
-    fetch: (url, init) => (url.startsWith("data:") ? images.fetchDataUrl(url) : claude.fetch(url, init)),
+    fetch: (url, init) =>
+      url.startsWith("data:")
+        ? images.fetchDataUrl(url)
+        : url.startsWith("http://127.0.0.1:")
+          ? receiver(url, init)
+          : claude.fetch(url, init),
     createImageBitmap: images.createImageBitmap,
     OffscreenCanvas: images.OffscreenCanvas,
   });
@@ -132,6 +143,8 @@ function startExtension({ settings = {}, session = {}, panel = true, page = "p1"
 
   const ext = {
     ctx,
+    shots: received_shots,
+    receiverStatus: 200,
     chrome,
     claude,
     tab,
@@ -158,7 +171,9 @@ function startExtension({ settings = {}, session = {}, panel = true, page = "p1"
           tab.overlay = null; // a user action hides the overlay at once
         }
       }
-      await Promise.all(chrome.runtime.onMessage.dispatch({ type: "pageTurned", reason }, { tab: { ...chrome._.activeTab } }));
+      // What the onMessage listener hands it to; awaited here so the job has
+      // started (the listener itself can't return the promise).
+      await ctx.onPageTurned({ type: "pageTurned", reason }, { tab: { ...chrome._.activeTab } });
     },
     // The side panel's button (also Alt+T); resolves once the worker has it.
     async pressTranslate() {

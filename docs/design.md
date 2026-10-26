@@ -248,6 +248,16 @@ Tesseract、ONNX Runtime 和 canvas 都是假的，所以測試不驗證實際�
 
 有版權的書的截圖不放進 repo。
 
+**用測試工具批次截圖**：側邊欄屬於擴充功能介面，瀏覽器自動化工具點不到「存下截圖」，所以另有一條開發者用的路徑，預設關閉：
+
+1. 設定頁最下面「開發者」勾選「允許測試工具觸發『存下截圖』」（存在 `chrome.storage.local`，只影響這台電腦）。
+2. 執行 `node tests/tools/receive-fixtures.js [資料夾]`，在 127.0.0.1:8765 接收截圖，寫成 `<名稱>.jpg` 和 `<名稱>.json`（書頁位置）。
+3. 在 Kindle 分頁裡（DevTools console 或自動化工具）執行 `window.postMessage({ type: "kindle-translator-dev-capture", id: 1, name: "alice-ch1-p1" }, "*")`，等 `kindle-translator-dev-capture-result` 回覆。
+
+content script 只轉送來自同一個視窗的要求；背景程式檢查開關、必須是視窗目前顯示的 Kindle 分頁、沒有翻譯在進行，截圖直接送到接收程式。頁面只會收到成功或失敗，拿不到截圖本身。
+
+注意：用 Claude in Chrome 操作時，它會在畫面最外圈畫一圈橘色光暈，並在滑鼠位置畫游標，兩者都會出現在截圖裡。光暈只在外圈約 2%，在書頁範圍外；截圖前把滑鼠移到書頁範圍外。截圖前也要關掉側邊欄的「翻頁自動翻譯」，否則每翻一頁都會呼叫 API。
+
 ## 10. 已知限制
 
 - 只打包英文的 OCR 模型，翻譯方式 1、2 只支援英文書。

@@ -462,9 +462,31 @@ test.describe("page turns", () => {
 
   test("a turn in a background tab is ignored", async () => {
     const ext = startExtension();
-    await Promise.all(ext.chrome.runtime.onMessage.dispatch({ type: "pageTurned", reason: "key" }, { tab: { id: 9, windowId: 1, active: false } }));
+    await ext.ctx.onPageTurned({ type: "pageTurned", reason: "key" }, { tab: { id: 9, windowId: 1, active: false } });
     await ext.idle();
     assert.equal(ext.chrome._.captures, 0);
+  });
+
+  test("the page-turn message reaches onPageTurned", async () => {
+    const ext = startExtension();
+    ext.tab.page = "p2";
+    ext.chrome.runtime.onMessage.dispatch({ type: "pageTurned", reason: "key" }, { tab: { ...ext.chrome._.activeTab } });
+    await waitFor(() => ext.ctx.run("current"), { what: "job started" });
+    await ext.idle();
+    assert.equal(ext.tab.overlay?.page, "p2");
+  });
+
+  test("no listener answers a message it doesn't handle", async () => {
+    // Chrome takes a returned promise as the reply: an async listener would
+    // answer every message (devCapture's too) with undefined first.
+    const ext = startExtension();
+    for (const type of ["pageTurned", "devCapture", "layoutProgress", "somethingElse"]) {
+      const answers = ext.chrome.runtime.onMessage.dispatch({ type, progress: 0 }, { tab: { ...ext.chrome._.activeTab } }, () => {});
+      const replying = answers.filter((a) => a === true || typeof a?.then === "function");
+      assert.ok(replying.length <= 1, `${type}: ${replying.length} listeners reply`);
+      if (type !== "devCapture") assert.equal(replying.length, 0, `${type} gets no reply`);
+    }
+    await ext.idle();
   });
 
   test("other runtime messages are ignored", async () => {
@@ -896,5 +918,75 @@ test.describe("saving a screenshot for tests", () => {
     ext.chrome._.screen = null;
     await shoot(ext);
     assert.match(ext.msgs("error")[0].text, /^截圖失敗：/);
+  });
+});
+
+test.describe("test screenshots asked for by a test tool", () => {
+  const ask = (ext, name, tab = ext.chrome._.activeTab) => ext.ctx.devCapture({ ...tab }, name);
+
+  test("refused while the developer switch is off", async () => {
+    const ext = startExtension();
+    assert.deepEqual(plain(await ask(ext, "x")), { ok: false, error: "開發者開關沒有開啟（設定頁）" });
+    assert.equal(ext.chrome._.captures, 0);
+  });
+
+  test("sent to the local receiver, named as asked, with where the book was drawn", async () => {
+    const ext = startExtension();
+    await ext.chrome.storage.local.set({ devCapture: true });
+    const out = plain(await ask(ext, "alice-ch1-p1"));
+    assert.equal(out.ok, true);
+    assert.equal(out.filename, "alice-ch1-p1.jpg");
+    const [shot] = ext.shots;
+    assert.equal(shot.url, "http://127.0.0.1:8765/fixture");
+    assert.equal(shot.body.filename, "alice-ch1-p1.jpg");
+    assert.match(shot.body.dataUrl, /^data:image\//);
+    assert.deepEqual(shot.body.info.page, ext.tab.geometry.page);
+    assert.equal(shot.body.info.asin, "B0TESTBOOK");
+    assert.equal(parseScreenUrl(shot.body.dataUrl).overlay, null, "no overlay in the shot");
+  });
+
+  test("an unusable name falls back to the timestamped one", async () => {
+    const ext = startExtension();
+    await ext.chrome.storage.local.set({ devCapture: true });
+    for (const name of ["../etc/passwd", "Has Spaces", "", 42, undefined]) {
+      const out = plain(await ask(ext, name));
+      assert.match(out.filename, /^kindle-B0TESTBOOK-\d{8}-\d{6}\.jpg$/, String(name));
+    }
+  });
+
+  test("only the tab on screen, and only a Kindle tab", async () => {
+    const ext = startExtension();
+    await ext.chrome.storage.local.set({ devCapture: true });
+    assert.equal(plain(await ask(ext, "x", { ...ext.chrome._.activeTab, active: false })).error, "只能截目前顯示的 Kindle 分頁");
+    assert.equal(plain(await ask(ext, "x", { id: 2, windowId: 1, active: true, url: "https://example.com/" })).error, "只能截目前顯示的 Kindle 分頁");
+    assert.equal(plain(await ext.ctx.devCapture(undefined, "x")).error, "只能截目前顯示的 Kindle 分頁");
+    assert.equal(ext.shots.length, 0);
+  });
+
+  test("not while translating", async () => {
+    const gate = deferred();
+    const ext = startExtension({ claude: async () => (await gate.promise, undefined) });
+    await ext.chrome.storage.local.set({ devCapture: true });
+    ext.ctx.translateActivePage({ force: true });
+    await waitFor(() => ext.claude.calls.length);
+    assert.equal(plain(await ask(ext, "x")).error, "翻譯進行中，等完成再截圖");
+    gate.resolve();
+    await ext.idle();
+  });
+
+  test("a receiver that isn't running or refuses is reported", async () => {
+    const ext = startExtension();
+    await ext.chrome.storage.local.set({ devCapture: true });
+    ext.receiverStatus = 400;
+    assert.equal(plain(await ask(ext, "x")).error, "接收程式回應 HTTP 400");
+  });
+
+  test("the onMessage listener answers devCapture asynchronously", async () => {
+    const ext = startExtension();
+    const replies = [];
+    const answers = ext.chrome.runtime.onMessage.dispatch({ type: "devCapture", name: "x" }, { tab: { ...ext.chrome._.activeTab } }, (r) => replies.push(plain(r)));
+    assert.ok(answers.includes(true), "keeps the channel open");
+    await waitFor(() => replies.length);
+    assert.equal(replies[0].ok, false); // the switch is off
   });
 });

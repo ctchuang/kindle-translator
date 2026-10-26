@@ -501,3 +501,37 @@ test("geometry is null without page images", (t) => {
   assert.equal(g.page, null);
   assert.deepEqual(g.viewport, { width: 1000, height: 800 });
 });
+
+// ---- Test screenshots (options page → 開發者) ----
+
+test("a test tool's capture request is relayed and the result posted back", async (t) => {
+  const s = setup(t);
+  s.chrome._.runtimeMessageHandler = (msg) => (msg.type === "devCapture" ? { ok: true, filename: `${msg.name}.jpg`, bytes: 1234 } : undefined);
+  const results = [];
+  s.page.window.addEventListener("message", (e) => e.data?.type === "kindle-translator-dev-capture-result" && results.push(plain(e.data)));
+  s.page.window.postMessage({ type: "kindle-translator-dev-capture", id: 7, name: "alice-p1" }, "*");
+  await waitFor(() => results.length);
+  assert.deepEqual(plain(s.chrome._.runtimeMessages.filter((m) => m.type === "devCapture")), [{ type: "devCapture", name: "alice-p1" }]);
+  assert.deepEqual(results, [{ type: "kindle-translator-dev-capture-result", id: 7, ok: true, filename: "alice-p1.jpg", bytes: 1234 }]);
+});
+
+test("a failed relay is reported back, not thrown", async (t) => {
+  const s = setup(t);
+  s.chrome._.runtimeMessageHandler = (msg) => {
+    if (msg.type === "devCapture") throw new Error("Extension context invalidated.");
+  };
+  const results = [];
+  s.page.window.addEventListener("message", (e) => e.data?.type === "kindle-translator-dev-capture-result" && results.push(plain(e.data)));
+  s.page.window.postMessage({ type: "kindle-translator-dev-capture", id: 1 }, "*");
+  await waitFor(() => results.length);
+  assert.equal(results[0].ok, false);
+  assert.match(results[0].error, /Extension context invalidated/);
+});
+
+test("capture requests from another window are ignored", async (t) => {
+  const s = setup(t);
+  // e.g. an ad iframe posting to the reader.
+  s.page.fire(s.page.window, "message", { data: { type: "kindle-translator-dev-capture", id: 1 }, source: {} });
+  await sleep(10);
+  assert.equal(s.chrome._.runtimeMessages.filter((m) => m.type === "devCapture").length, 0);
+});

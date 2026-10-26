@@ -516,10 +516,16 @@ function loadPage(files, { chrome, html, innerWidth = 1000, innerHeight = 800, t
   document.defaultView = ctx;
   eventTarget(ctx);
   // Delivered as a task, like the real thing.
+  // The sender is taken to be this window itself (a page script or content
+  // script posting to its own window); a frame posting to its top window
+  // shows up as the top window too, which no script here tells apart.
   ctx.postMessage = (data) => {
     const clone = structuredClone(data);
-    setTimeout(() => dispatch(ctx, new Event("message", { data: clone, bubbles: false })), 0);
+    // `window` as the scripts see it: vm's global proxy, not the sandbox object.
+    const source = vm.runInContext("window", ctx);
+    setTimeout(() => dispatch(ctx, new Event("message", { data: clone, source, bubbles: false })), 0);
   };
+  ctx.location ??= { origin: "https://read.amazon.com", href: "https://read.amazon.com/?asin=B0TESTBOOK" };
   for (const f of files) vm.runInContext(source(f), ctx, { filename: f });
 
   return {

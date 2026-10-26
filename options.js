@@ -24,3 +24,12 @@ document.getElementById("save").onclick = async () => {
   document.getElementById("saved").textContent = "已儲存";
   setTimeout(() => (document.getElementById("saved").textContent = ""), 1500);
 };
+
+// Developer switch: on this computer only, so it's in local storage and
+// takes effect at once rather than on 儲存.
+const devCapture = document.getElementById("devCapture");
+chrome.storage.local.get({ devCapture: false }).then((v) => {
+  devCapture.checked = v.devCapture;
+  if (v.devCapture) document.getElementById("developer").open = true;
+});
+devCapture.onchange = () => chrome.storage.local.set({ devCapture: devCapture.checked });

@@ -120,6 +120,8 @@ node --test --watch "tests/**/*.test.js"                  # 改程式時自動�
 
 測試把擴充功能的檔案原封不動地載入，周圍的 Chrome API、截圖、OCR、Claude API 和 DOM 都換成假的，所以不需要瀏覽器、API key 或網路，跑一次約 15 秒。`tests/fixtures/` 裡有幾張沒有版權的書的真實截圖（用側邊欄執行紀錄的「存下截圖」存下），用來測頁面指紋、裁切、分欄和顏色。Tesseract 和版面模型的實際輸出不在測試範圍內，要用真實截圖確認。測試的架構見 [docs/design.md](docs/design.md) 第 9 節。
 
+批次製作測試截圖的方法見 [docs/design.md](docs/design.md) 第 9 節。
+
 改動擴充功能後，到 `chrome://extensions` 按擴充功能的重新載入，再重新整理 Kindle 分頁。
 
 ## 致謝

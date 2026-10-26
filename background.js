@@ -208,8 +208,14 @@ chrome.runtime.onConnect.addListener((port) => {
   });
 });
 
-chrome.runtime.onMessage.addListener(async (msg, sender) => {
-  if (msg.type !== "pageTurned") return;
+// Not an async listener: Chrome takes a listener's returned promise as its
+// reply, so an async one answered every message, devCapture's included, with
+// undefined before the right listener could.
+chrome.runtime.onMessage.addListener((msg, sender) => {
+  if (msg.type === "pageTurned") onPageTurned(msg, sender);
+});
+
+async function onPageTurned(msg, sender) {
   const { autoTranslate } = await getSettings();
   // Only translate when the panel is open, so we don't spend tokens silently.
   if (!(await panelOpen()) || !sender.tab?.active) return;
@@ -220,12 +226,34 @@ chrome.runtime.onMessage.addListener(async (msg, sender) => {
   const cleared = msg.reason !== "dom" ? "，書頁上的譯文已先清掉" : "";
   log(`偵測到翻頁（${msg.reason}${cleared}）`);
   translateActivePage({ force: false, reason: msg.reason });
-});
+}
 
 // Development aid: the screen exactly as translation captures it (same
 // call, format and quality, our overlay hidden), plus where the book is
-// drawn, for the side panel to save as a test input. The overlay is redrawn
-// afterwards, from the cache.
+// drawn, as a test input. The overlay is redrawn afterwards, from the cache.
+// Resolves to { dataUrl, filename, info }; `name` replaces the timestamp in
+// the file name.
+async function testShot(tab, name) {
+  let hidden = false;
+  try {
+    hidden = !!(await sendToPage(tab.id, { type: "overlayState" }))?.shown;
+    if (hidden) await sendToPage(tab.id, { type: "clearOverlay" });
+  } catch (_) {} // no content script: there's no overlay to hide either
+  const geometry = await pageGeometry(tab.id);
+  let dataUrl;
+  try {
+    dataUrl = await capture(tab.windowId);
+  } finally {
+    if (hidden) translateActivePage({ force: false, reason: "overlay" });
+  }
+  const asin = new URL(tab.url).searchParams.get("asin") || "unknown";
+  const stamp = new Date().toISOString().replace(/[-:]/g, "").replace("T", "-").slice(0, 15);
+  const filename = `${name || `kindle-${asin}-${stamp}`}.jpg`;
+  log(`已截圖：${filename}（${Math.round((dataUrl.length * 3) / 4 / 1024)} KB）`, dataUrl);
+  return { dataUrl, filename, info: { asin, capturedAt: new Date().toISOString(), ...geometry } };
+}
+
+// 存下截圖 in the side panel: the panel saves the file.
 async function saveScreenshot(port) {
   if (current) {
     log("翻譯進行中，等完成再截圖");
@@ -236,28 +264,45 @@ async function saveScreenshot(port) {
     broadcast({ type: "error", text: "目前分頁不是 Kindle Cloud Reader。" });
     return;
   }
-  let hidden = false;
+  let shot;
   try {
-    hidden = !!(await sendToPage(tab.id, { type: "overlayState" }))?.shown;
-    if (hidden) await sendToPage(tab.id, { type: "clearOverlay" });
-  } catch (_) {} // no content script: there's no overlay to hide either
-  const geometry = await pageGeometry(tab.id);
-  let dataUrl;
-  try {
-    dataUrl = await capture(tab.windowId);
+    shot = await testShot(tab);
   } catch (err) {
     broadcast({ type: "error", text: `截圖失敗：${err.message}` });
     return;
-  } finally {
-    if (hidden) translateActivePage({ force: false, reason: "overlay" });
   }
-  const asin = new URL(tab.url).searchParams.get("asin") || "unknown";
-  const stamp = new Date().toISOString().replace(/[-:]/g, "").replace("T", "-").slice(0, 15);
-  const filename = `kindle-${asin}-${stamp}.jpg`;
-  log(`已截圖：${filename}（${Math.round((dataUrl.length * 3) / 4 / 1024)} KB）`, dataUrl);
   try {
-    port.postMessage({ type: "screenshot", dataUrl, filename, info: { asin, capturedAt: new Date().toISOString(), ...geometry } });
+    port.postMessage({ type: "screenshot", ...shot });
   } catch (_) {} // the panel closed meanwhile
+}
+
+// The same shot asked for by a test tool driving the reader page (content.js
+// relays it), sent straight to a receiver on this computer
+// (tests/tools/receive-fixtures.js) instead of the downloads folder. Off
+// unless the options page's developer switch is on; the page only learns
+// whether it worked, never the image.
+const DEV_RECEIVER = "http://127.0.0.1:8765/fixture";
+
+chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
+  if (msg.type !== "devCapture") return;
+  devCapture(sender.tab, msg.name).then(sendResponse, (err) => sendResponse({ ok: false, error: String(err?.message || err) }));
+  return true; // replies asynchronously
+});
+
+async function devCapture(tab, name) {
+  const { devCapture: enabled } = await chrome.storage.local.get({ devCapture: false });
+  if (!enabled) return { ok: false, error: "開發者開關沒有開啟（設定頁）" };
+  if (!tab?.active || !READER_RE.test(tab.url || "")) return { ok: false, error: "只能截目前顯示的 Kindle 分頁" };
+  if (current) return { ok: false, error: "翻譯進行中，等完成再截圖" };
+  const safe = typeof name === "string" && /^[a-z0-9][a-z0-9-]{0,80}$/.test(name) ? name : undefined;
+  const shot = await testShot(tab, safe);
+  const res = await fetch(DEV_RECEIVER, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(shot),
+  });
+  if (!res.ok) return { ok: false, error: `接收程式回應 HTTP ${res.status}` };
+  return { ok: true, filename: shot.filename, bytes: Math.round((shot.dataUrl.length * 3) / 4) };
 }
 
 // Whether a side panel is open. Not panelPorts: Chrome stops this worker
