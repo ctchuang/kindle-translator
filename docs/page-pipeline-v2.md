@@ -42,7 +42,8 @@
 - **每翻一頁，`img` 都換一個新的 blob URL。** 翻頁時不發網路請求，下一頁是從閱讀器記憶體裡的資料當場畫出來的。
 - **頁面資料來自 `https://read.amazon.com/renderer/render`。** 回應是 TAR，一次 6 個畫面（`numPage=6`，跨頁時一個畫面就是一個跨頁）。參數包括 `asin`、`revision`、字型、字級、行距、`width`／`height`（書頁範圍的 CSS 像素）、邊界、`theme`、`maxNumberColumns`、`rasterScale`、`startingPosition`、`numPage`、`skipPageCount`。
 - **閱讀器大約維持往後 12 個畫面的緩衝。** 開書時從同一個位置發 4 個請求：往後 `skip=0`、`skip=6` 各 6 個畫面，往前也拿一些。往後讀時每用掉約 6 個畫面補拿下一批（這次在翻到第 6 個畫面時要了 `skip=12`，再往後要了 `skip=18`）。視窗大小改變時，整組請求依新尺寸重發。
-- **頁面載入後才包住 `window.fetch` 也攔得到。** 閱讀器每次都透過 `window.fetch` 發請求，沒有事先存下原本的 `fetch`。
+- **頁面載入後才包住 `window.fetch` 也攔得到。** 閱讀器每次都透過 `window.fetch` 發請求，沒有事先存下原本的 `fetch`。這些請求出現在主執行緒的 Resource Timing 裡（`initiatorType` 是 `fetch`），不是從 Web Worker 發的。所以在 `document_start` 包好的話，開書時的第一批也攔得到；這點要等 `page-hook.js` 實作後在擴充功能裡確認（§7 步驟 1）。
+- **改閱讀設定時，從目前這一頁重新拿。** 改主題、字級、單欄／雙欄後，閱讀器馬上依新設定發一組新的請求，第一批（`skip=0`）就從目前這一頁開始，所以目前這一頁一定在新的批次裡。
 
 ### 2.3 TAR 的內容
 
@@ -52,12 +53,14 @@
 |---|---|
 | `page_data_<i>_<j>.json` | 每個畫面一項：`width`／`height`（CSS 像素）、`startPositionId`／`endPositionId`、`fillColor`、`inkColor`，以及 `children`：文字串（`run`）和插圖（`image`） |
 | `glyphs.json` | 每種字型（`fontKey`）的字形向量輪廓（SVG path）、`unitsPerEm` |
-| `tokens_<i>_<j>.json` | 每個畫面的區塊，每塊有位置範圍、外框，以及每個字的位置範圍和外框 |
+| `tokens_<i>_<j>.json` | 每個畫面的段落（見下面），每段有位置範圍、外框，以及每個字的位置範圍和外框；插圖也是一項（`type: "image"`） |
 | `layout_data_*`、`layout.json`、`panels_*`、`toc.json`、`manifest.json`、`metadata.json` | 還沒細看 |
 
 一個文字串（`run`）有：`transform`（位置）、`glyphs`（字形編號陣列）、`xPosition`（每個字形的 x）、`fontKey`、`fontSize`、`fontWeight`、`fontStyle`、`textColor`、`startPositionId`／`endPositionId`、`rect`。字形編號是字型內部的編號，沒有對應的 Unicode 字元，所以讀不出文字。
 
-插圖（`image`）有 `transform`、`rect` 和 `imageReference`。圖片本身另外從 CDN 載入，不在 TAR 裡。
+插圖（`image`）有 `transform`、`rect` 和 `imageReference`（例如 `resource/rsrc1EA`）。圖片本身另外從 CDN 載入，不在 TAR 裡。
+
+**`tokens` 的區塊就是段落。** 每個區塊對應一個 `elementId`，也就是書的原始檔裡的一個段落元素（標題、內文段落各是一個），一個畫面有幾個 `elementId`，`tokens` 就有幾個文字區塊。區塊的順序不是閱讀順序，要依 `startPositionId` 排序。一段從左頁接到右頁時，區塊的外框是兩部分的聯集，所以會橫跨兩頁；畫譯文時要改用該段在每一欄的 `run` 外框（§3.4）。
 
 ### 2.4 自己畫出來的頁跟閱讀器的一樣
 
@@ -67,12 +70,28 @@
 - 每翻一頁，比對結果最接近的都正好是批次裡的下一張，所以可以用來找出畫面上是哪一頁。
 - 如果改用現在的指紋（縮成 240 像素寬、15% 門檻）比對，插圖的灰階在縮小時會滲到周圍，有插圖的頁差異有 56–75%。所以要在原尺寸下比對，而且把插圖排除在外（§3.3）。
 
+2026-10-28 用原尺寸、排除插圖的逐像素比對再測一次（差異 = 顏色差超過 30 的像素比例）：
+
+| 情況 | 正確的那一頁 | 次接近的另一頁 |
+|---|---|---|
+| 白底、雙欄 | 0% | 13.6% |
+| 米色、雙欄 | 0% | 14.9% |
+| 深色、雙欄 | 0% | 14.9% |
+| 深色、單欄 | 0% | 7.8%（只有 8 個文字串的頁） |
+| 深色、單欄、只有插圖沒有文字的頁 | 0% | 14.6% |
+
+- 背景用 `page.fillColor`、字用 `run.textColor` 畫，三種主題都一樣精確。三種主題的顏色：白 `#ffffff`／`#000000`，米色 `#e7dec7`／`#5d4232`，深色 `#000000`／`#acacac`（底色／字色）。
+- 只有插圖的頁，其他頁在那個範圍有文字，所以也分得出來。
+- 在頁面上用未最佳化的 JavaScript 比對 12 個候選，共 675 毫秒。實作時先比縮小的圖、從上一頁附近找起，可以快很多。
+
+**同一段的位置範圍跟字級無關。** 字級從 6.255 改成 7.92（單欄、深色）後，兩種字級的批次裡都出現的 184 個段落，每段的位置範圍（該段所有 `run` 的最小 `startPositionId` 到最大 `endPositionId`）完全一樣。這是段落快取（§3.5）的前提。
+
 ## 3. 設計
 
 ### 3.1 旁聽頁面資料
 
 - **`page-hook.js`（新）**：`manifest.json` 裡的第二個 content script，`"world": "MAIN"`、`"run_at": "document_start"`。包住 `window.fetch`：網址是 `/renderer/render` 時，`clone()` 一份回應，把位元組和請求參數用 `postMessage` 交給一般的 content script，原本的回應照常還給閱讀器。包裝裡的任何錯誤都接住，不影響原本的請求。
-- **`content.js`** 接收、解開 TAR，只保留 `page_data` 和 `glyphs`（`tokens` 是否需要見 §3.4），依請求參數分組：
+- **`content.js`** 接收、解開 TAR，只保留 `page_data` 和 `glyphs`（分段用 `run` 的 `elementId` 就夠，`tokens` 不需要，見 §3.4），依請求參數分組：
   - **版面鑰匙**（`layoutKey`）：`asin`、`revision`、字型、字級、行距、`width`、`height`、邊界、`theme`、`maxNumberColumns`、`rasterScale`。同一個位置在不同版面下會排成不同的畫面，所以「哪一頁」一定要連同版面鑰匙一起說。
   - 同一個版面鑰匙下的畫面依 `startPositionId` 排序、去重。換了版面鑰匙（視窗大小、字級、主題改了）就丟掉舊的。
   - 最多保留約 30 個畫面，超過時丟掉離目前這頁最遠的。
@@ -95,7 +114,7 @@
 1. 先比尺寸：`img` 的原始大小必須等於 `page.width × rasterScale` 和 `page.height × rasterScale`。
 2. 從上一次辨識到的畫面往前後找，通常第一個候選就中。
 3. 在原尺寸下，把候選畫面畫出來跟 `img` 逐像素比，插圖範圍（由 `image` 的 `transform` 和 `rect` 算出）排除在外。不同的像素少於 0.1% 就算同一頁，留一點空間給抗鋸齒的細微差異。
-4. 只有插圖、沒有文字的畫面，再比插圖的數量和位置。仍然分不出來時視為辨識失敗。
+4. 只有插圖、沒有文字的畫面，實測也分得出來（§2.4），因為其他頁在插圖的範圍外有文字。兩個候選都是 0% 時（例如兩頁只有位置相同的插圖），選離上一次辨識到的畫面最近的那個。
 
 結果是**頁面身分**：`{ layoutKey, startPositionId, endPositionId }`。content script 把它連同畫面在視窗中的位置（`img` 的 `getBoundingClientRect`）送給 background（`pageShown` 訊息）。
 
@@ -107,11 +126,13 @@
 
 - **輸入**：§3.2 畫出的頁面，不是截圖。不需要先清掉譯文、等畫面重畫，也不需要 `ocrCrop`、`OCR_CROP`：頁面本身就是書頁範圍。
 - **在哪裡畫**：offscreen 文件。background 把這一頁的 `page_data` 和用到的字形（從 content script 取得）交給 offscreen，offscreen 畫好直接 OCR，不用來回傳圖片。
-- **分欄、Tesseract、DocLayout-YOLO、分段**：照現在的流程（design.md §5）。跨頁仍然是一張圖，照樣用 `findColumns`。
-- **段落的位置範圍**：OCR 分好的每一段，找出外框落在段落框裡的 `run`，取最小的 `startPositionId` 和最大的 `endPositionId`，就是這一段的**位置範圍**。
-- **段落的外框**：改用這些 `run` 的外框聯集（精確到像素），不用 OCR 的框。`lines` 用不同基線的數目算。
-
-**待確認（§7 步驟 0）**：`tokens` 的區塊是不是就是段落。如果是，可以直接用它的位置範圍和外框分段，連 DocLayout-YOLO 都可能不需要。實測時看到一個區塊的外框橫跨左右兩頁，可能是一段從左頁接到右頁，框被合在一起，所以要確認。在確認之前，設計以 OCR＋DocLayout-YOLO 分段為準。
+- **分段不再靠猜**：頁面資料已經說了哪些文字串屬於同一段（`elementId`，§2.3），所以分段、標題、圖表都直接從頁面資料來：
+  - **段落**：同一個 `elementId` 的 `run` 就是一段。位置範圍是這些 `run` 的最小 `startPositionId` 到最大 `endPositionId`。
+  - **外框**：一段在每一欄各取 `run` 外框的聯集，所以從左頁接到右頁的段落是兩個框（畫譯文時把譯文依兩部分的長度比例分開，或整段畫在第一個框、第二個框只蓋住原文，實作時決定）。`lines` 是不同基線的數目。
+  - **標題**：字級明顯大於這一頁內文的中位數，或整段都是粗體而且只有一兩行。
+  - **圖表**：插圖是 `image`，本來就不是文字，也不會被畫出來（§3.2）。
+- **OCR 只負責讀字**：Tesseract 照現在的方式（每欄一次，跨頁照樣用 `findColumns` 分欄）讀出文字和每一行的框，再把每一行放進框重疊最多的段落，就是現在 `groupWithLayout` 把行放進版面區塊的做法，只是區塊換成上面的段落外框。
+- **DocLayout-YOLO 拿掉**：它的工作（找段落、標題、圖表）全部由頁面資料取代。75 MB 的模型下載、WebGPU 的需求、ONNX Runtime 都不需要了。看圖模式本來就不用它。
 
 ### 3.5 段落快取
 
@@ -202,12 +223,15 @@
 | `page-render.js`（新） | 解 TAR、畫出頁面、比對頁面；純函式，content script、offscreen、Node 測試共用 |
 | `manifest.json` | 新的 content script 項目；`content.js` 也要載入 `page-render.js` |
 | `content.js` | 保留批次、偵測 `img` 換頁、辨識頁面、`pageShown` 訊息；畫譯文時用頁面座標和頁面身分；移除翻頁計數和使用者動作的 debounce（只留 API 的 debounce 在 background） |
-| `offscreen.js` | 接收頁面資料、畫出頁面後 OCR |
+| `offscreen.js` | 接收頁面資料、畫出頁面後 OCR；不再跑版面模型 |
+| `layout-model.js`、`vendor/onnxruntime/`、`vendor/doclayout/` | 刪除（§3.4） |
 | `background.js` | 以頁面身分為主的流程、段落快取、工作排程（前景／背景／預讀）、段落位置範圍和外框；移除指紋、`sigCrop`、`ocrCrop`、`overlaySig`、`lastSig`、取色；截圖只留給看圖模式和「存下截圖」 |
 | `page-sig.js` | 刪除 |
-| `ocr-layout.js` | 不變 |
+| `ocr-layout.js` | `findColumns` 不變；`groupWithLayout` 改成把行放進頁面資料的段落；`groupParagraphs`（規則分段）只剩沒有對到任何段落的行會用到，可能可以刪 |
 | `options.html/js` | 「預先翻譯下一頁」開關 |
-| `tests/` | 見 §7 步驟 6。測試資料不能放 Amazon 的字形（§6） |
+| `tests/` | 見 §7 各步驟的測試。測試資料不能放 Amazon 的字形（§6） |
+| `tests/fixtures/`、`tests/fixtures.test.js` | 刪除：這些真實截圖測的是指紋、裁切範圍、從截圖取色和截圖上的分欄，v2 都不再用截圖做 |
+| 「存下截圖」、`devCapture`、`tests/tools/receive-fixtures.js` | 改成存下攔到的頁面資料（TAR）供本機除錯，不放進 repo（Amazon 的字形） |
 | `docs/design.md` | 整份改寫：流程、頁面身分、快取、排程 |
 | `README.md`、`README.en.md` | 運作方式、版本紀錄 |
 
@@ -224,11 +248,11 @@
 9. 單頁、跨頁、白／米色／深色主題都成立。
 10. 擴充功能不會對 Amazon 發出任何閱讀器本身沒有發的請求（DevTools 的 Network 確認）。
 11. 看圖模式照常運作。
+12. 不再下載 DocLayout-YOLO 模型，沒有 WebGPU 的電腦也能用翻譯方式 1、2。
 
 ## 6. 待決定
 
 - **辨識失敗時要不要退回截圖流程**：設計是不退回（§3.3），程式只有一條路。代價是格式一改就整個不能用，直到擴充功能更新。如果覺得風險太高，可以保留現在的截圖流程當備案，但要接受兩套流程並存。
-- **`tokens` 能不能取代 OCR 分段**：看步驟 0 的結果。能的話 DocLayout-YOLO 可能整個不需要（75 MB 下載、WebGPU 需求都可以拿掉），但那是另一個改動，不放在這次。
 - **快取要不要跨瀏覽器重開**：段落快取跟版面無關，很適合放 `chrome.storage.local` 長期保存（[reference-pages.md](reference-pages.md) 也需要 1 週的保存）。這次先維持 session storage，跟現在一樣。
 - **停留門檻 2 秒**：上線後看執行紀錄再調。
 - **測試資料**：TAR 裡有 Amazon 字型（Bookerly）的字形輪廓，不能放進公開的 repo。測試用的 TAR 要自己產生：用一個開源字型的字形輪廓，照同樣的 JSON 格式組出假的頁面資料。
@@ -242,12 +266,12 @@
 - 0.2 ~~TAR 的格式~~：見 §2.3。
 - 0.3 ~~自己畫的頁跟閱讀器的一不一樣~~：插圖以外一樣（§2.4）。
 - 0.4 ~~頁面載入後才包 `fetch` 攔不攔得到~~：攔得到（§2.2）。
-- 0.5 `document_start` 的 MAIN world 包裝能不能攔到開書時的第一批。
-- 0.6 `tokens` 的區塊是不是段落；跨欄的區塊是怎麼回事。
-- 0.7 單頁顯示、米色和深色主題下：`fillColor`、`textColor`，以及逐像素比對是否仍然成立。
-- 0.8 只有插圖的畫面、章節開頭的空白畫面怎麼辨識。
-- 0.9 同一段文字在不同字級下，`run` 的位置範圍是否一致（段落快取的前提）。
-- 0.10 多量幾頁的時間組成（§2.1）。
+- 0.5 `document_start` 的 MAIN world 包裝能不能攔到開書時的第一批：從主執行緒、每次都經過 `window.fetch` 來看應該可以（§2.2），但瀏覽器自動化工具沒辦法在 `document_start` 注入，要等步驟 1.1 在擴充功能裡確認。
+- 0.6 ~~`tokens` 的區塊是不是段落~~：是，每個區塊是一個 `elementId`；跨欄的區塊是一段從左頁接到右頁（§2.3）。
+- 0.7 ~~單欄、米色和深色主題~~：都能逐像素比對，顏色見 §2.4。
+- 0.8 ~~只有插圖的畫面~~：分得出來（§2.4）。章節結尾只有幾行字的畫面也一樣。
+- 0.9 ~~同一段文字在不同字級下的位置範圍~~：一致（§2.4）。
+- 0.10 多量幾頁的時間組成（§2.1）：要開著自動翻譯、會花 API，還沒做。
 
 **1. 旁聽與保留批次**
 - 1.1 `page-hook.js` 和 manifest 項目。
@@ -263,15 +287,17 @@
 
 **3. OCR 與段落**
 - 3.1 offscreen 畫出頁面後 OCR。
-- 3.2 段落的位置範圍和外框（§3.4）。
-- 3.3 測試：位置範圍、外框、被頁緣切斷的段落。
+- 3.2 從頁面資料分段：位置範圍、每欄的外框、標題（§3.4）；OCR 的行放進段落。
+- 3.3 拿掉 DocLayout-YOLO、ONNX Runtime 和側邊欄的模型狀態列。
+- 3.4 測試：位置範圍、跨欄的段落、被頁緣切斷的段落、標題判斷、對不到段落的行。
 
 **4. 段落快取與排程**
 - 4.1 `para:`、`page:` 快取（§3.5）。
 - 4.2 前景／背景工作改成翻譯一組段落，翻頁時不取消；正在翻的段落不重送。
 - 4.3 畫上譯文前比對頁面身分。
-- 4.4 移除指紋和截圖流程（看圖模式和「存下截圖」除外）、`page-sig.js`、取色。
-- 4.5 測試：命中、部分命中、改版面後只送切斷的段落、翻頁時存結果、重新翻譯本頁。
+- 4.4 移除指紋和截圖流程（看圖模式除外）、`page-sig.js`、取色，以及 `tests/fixtures/` 的截圖和 `tests/fixtures.test.js`。
+- 4.5 「存下截圖」和測試工具的截圖改成存下頁面資料（只存在本機）。
+- 4.6 測試：命中、部分命中、改版面後只送切斷的段落、翻頁時存結果、重新翻譯本頁。
 
 **5. 預讀**
 - 5.1 預讀工作與開始條件（§3.6）。
