@@ -54,11 +54,12 @@ The model runs on your GPU through [ONNX Runtime Web](https://github.com/microso
   - **2. Polished (default)**: as 1, then Sonnet 5.5 reviews Haiku's translation, returning only the paragraphs it changes; the changes are listed in the side panel's log. In testing the review took 2–3 seconds per column, about 10 seconds for the page, at about 1 cent per page.
   - In 1 and 2 a column is occasionally declined on copyright grounds; that column is then translated as text by Opus 5.5 instead (without a review), about 15 seconds for the page.
   - **3. Read the image**: the screenshot goes straight to Claude Opus 5.5, which finds the paragraphs and translates them, and can handle books in other languages. 20+ seconds per page, effort defaults to low. In testing, Sonnet 5.5 and Haiku 5.5 declined book-page screenshots on copyright grounds, so this mode uses Opus only. When a safety classifier declines Opus 5.5, the request is retried on Opus 5, then Opus 4.8.
-- The only server contacted is api.anthropic.com. The API key is kept in Chrome sync storage.
+- Translation only contacts api.anthropic.com; the layout model is also downloaded from Hugging Face on the first translation (see below). The API key is kept in Chrome sync storage.
 - In Opus mode the screenshot is scaled to at most 2576 px on the long edge and 3.7 MP in total before sending; anything larger gets scaled again by the API and the coordinates no longer line up.
 - Claude occasionally returns a summary instead of a translation, citing copyright. A summary triggers one automatic retry; if it is still a summary it is shown and labelled 「摘要」 (summary), but not cached.
 - Positions are per paragraph, not per line, and boxes are occasionally a little off. In OCR mode paragraphs follow DocLayout-YOLO's blocks; only lines the model doesn't cover (such as a line cut off at the page edge) are split by indentation, line spacing and short lines.
 - The DocLayout-YOLO model file is 75 MB. It's downloaded from Hugging Face on the first translation, verified, and kept in the browser; the first page waits for the download, with progress in the side panel. WebGPU is required. If the model can't run there is no fallback: the side panel shows the error in red and the page isn't translated.
+- The translation boxes cover the page's highlights, and the original text under them. To add a highlight, switch to the original first (the bottom-right button or Alt+O), select the text and highlight it, then switch back to the translation.
 - Recognition gets worse when the book text is small; enlarge the reader font or the window.
 - This translates page by page for your own reading. Don't use it to export book content in bulk; that violates Amazon's terms of use.
 
