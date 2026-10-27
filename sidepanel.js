@@ -84,22 +84,16 @@ function onMessage(msg) {
     translateBtn.textContent = msg.retranslate ? "重新翻譯本頁" : "翻譯這一頁";
     document.getElementById("overlayHint").hidden = msg.retranslate;
   }
-  if (msg.type === "layoutState") {
-    const el = document.getElementById("layoutState");
-    el.textContent = msg.text;
-    el.className = msg.level;
-  }
   if (msg.type === "idle" && ticker) setStatus("");
   if (msg.type === "result") {
     setStatus("");
     addPage(msg.text, msg.cached, msg.fallbackModel, msg.summary);
   }
   if (msg.type === "warn") setStatus(msg.text, true);
-  if (msg.type === "screenshot") {
-    saveFile(msg.dataUrl, msg.filename);
-    // Where the book was drawn, for the OCR crop in tests (tests/fixtures).
-    const json = JSON.stringify(msg.info ?? {}, null, 2);
-    saveFile(`data:application/json;charset=utf-8,${encodeURIComponent(json)}`, msg.filename.replace(/\.jpg$/, ".json"));
+  if (msg.type === "savePage") {
+    const url = URL.createObjectURL(new Blob([msg.json], { type: "application/json" }));
+    saveFile(url, msg.filename);
+    setTimeout(() => URL.revokeObjectURL(url), 60_000);
   }
   if (msg.type === "error") {
     setStatus(msg.text, true);

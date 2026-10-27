@@ -3,12 +3,16 @@ const FIELDS = { apiKey: "", effort: "low", targetLang: "繁體中文（台灣�
 // background reads: engine ("ocr" | "vision") and the OCR quality level.
 const MODE_SETTINGS = { engine: "ocr", quality: "review" };
 
+// Checkboxes, saved with the rest.
+const CHECKS = { prefetch: true };
+
 const mode = document.getElementById("mode");
 const showEffort = () => (document.getElementById("effortRow").hidden = mode.value !== "vision");
 mode.onchange = showEffort;
 
-chrome.storage.sync.get({ ...FIELDS, ...MODE_SETTINGS }).then((v) => {
+chrome.storage.sync.get({ ...FIELDS, ...MODE_SETTINGS, ...CHECKS }).then((v) => {
   for (const k of Object.keys(FIELDS)) document.getElementById(k).value = v[k];
+  for (const k of Object.keys(CHECKS)) document.getElementById(k).checked = v[k];
   mode.value = v.engine === "vision" ? "vision" : v.quality;
   if (!mode.value) mode.value = MODE_SETTINGS.quality; // unknown stored level
   showEffort();
@@ -17,6 +21,7 @@ chrome.storage.sync.get({ ...FIELDS, ...MODE_SETTINGS }).then((v) => {
 document.getElementById("save").onclick = async () => {
   const v = {};
   for (const k of Object.keys(FIELDS)) v[k] = document.getElementById(k).value.trim();
+  for (const k of Object.keys(CHECKS)) v[k] = document.getElementById(k).checked;
   if (mode.value === "vision") v.engine = "vision";
   else Object.assign(v, { engine: "ocr", quality: mode.value });
   await chrome.storage.sync.set(v);

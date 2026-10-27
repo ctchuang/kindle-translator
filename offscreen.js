@@ -28,28 +28,18 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
 });
 
 // Recognize each rectangle (page column) of the image separately and return
-// its text lines with boxes in image pixels, plus two word measurements the
-// layout code uses: the widest gap between words and the first word's width.
-// The layout model runs alongside on the GPU, and its regions come back per
-// column too; if it fails, the whole request fails.
+// its text lines with boxes in image pixels. Read as one, Tesseract takes the
+// gutter of a two-page spread for a word space and joins both pages' lines.
 async function ocr({ image, rects }) {
   const worker = await getWorker();
-  const bitmap = await createImageBitmap(await (await fetch(image)).blob());
-  const layoutDone = layout(bitmap, rects);
-  layoutDone.catch(() => {}); // awaited below; don't report it as unhandled meanwhile
   const columns = [];
   for (const rectangle of rects) {
     const { data } = await worker.recognize(image, { rectangle }, { blocks: true, text: false });
     columns.push(
       (data.blocks || [])
         .flatMap((b) => b.paragraphs.flatMap((p) => p.lines))
-        .map((l) => ({ ...l.bbox, text: l.text, confidence: l.confidence, ...wordMetrics(l.words || []) }))
+        .map((l) => ({ ...l.bbox, text: l.text, confidence: l.confidence }))
     );
   }
-  return { columns, layout: await layoutDone };
-}
-
-function wordMetrics(words) {
-  const gaps = words.slice(1).map((w, i) => w.bbox.x0 - words[i].bbox.x1);
-  return { maxGap: Math.max(0, ...gaps), firstWord: words.length ? words[0].bbox.x1 - words[0].bbox.x0 : 0 };
+  return { columns };
 }

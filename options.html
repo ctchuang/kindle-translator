@@ -30,7 +30,7 @@
     <option value="review">2. 精修：本機辨識文字，Haiku 翻譯後由 Sonnet 校對（約 10 秒，每頁約 1 美分）</option>
     <option value="vision">3. 看圖：截圖直接交給 Opus 辨識並翻譯（20 秒以上，可處理非英文書）</option>
   </select>
-  <div class="hint">1、2 在瀏覽器裡用 Tesseract 辨識文字、用 DocLayout-YOLO（WebGPU）找段落和圖表位置，只把文字送給 Claude，截圖不會離開電腦，目前只支援英文書。某一欄被拒絕或只給摘要時，那一欄會自動改用 Opus 翻譯。2 的 Sonnet 只回傳需要修改的段落，校對失敗時沿用 Haiku 的譯文。<br />3 把截圖送給 Opus，排版辨識較好，也能處理其他語言，但比較慢，偶爾會以版權為由拒絕或只給摘要。<br />已翻過的頁面會用快取，改了設定後可按「重新翻譯本頁」。</div>
+  <div class="hint">1、2 用閱讀器自己的頁面資料找出段落和標題，在瀏覽器裡用 Tesseract 辨識文字，只把文字送給 Claude，書頁圖片不會離開電腦，目前只支援英文書。某一欄被拒絕或只給摘要時，那一欄會自動改用 Opus 翻譯。2 的 Sonnet 只回傳需要修改的段落，校對失敗時沿用 Haiku 的譯文。<br />3 把截圖送給 Opus，排版辨識較好，也能處理其他語言，但比較慢，偶爾會以版權為由拒絕或只給摘要。<br />已翻過的段落會用快取，改了字級或視窗大小也一樣；改了設定後可按「重新翻譯本頁」。</div>
 
   <div id="effortRow">
     <label for="effort">Opus 思考程度（effort）</label>
@@ -41,6 +41,9 @@
     </select>
   </div>
 
+  <label class="check"><input type="checkbox" id="prefetch" /> 預先翻譯下一頁</label>
+  <div class="hint">讀目前這一頁時就先把下一頁翻好，翻過去就能直接顯示。照順序往後讀時不會多花；跳頁、往回翻或停止閱讀時，預先翻好但沒讀到的頁照樣計費。只用於翻譯方式 1、2，而且只在側邊欄開著、勾選「翻頁自動翻譯」時。</div>
+
   <label for="targetLang">目標語言</label>
   <input id="targetLang" />
   <div class="hint">例如「繁體中文（台灣用語）」、「繁體中文（香港用語）」。</div>
@@ -49,8 +52,8 @@
 
   <details id="developer">
     <summary>開發者</summary>
-    <label class="check"><input type="checkbox" id="devCapture" /> 允許測試工具觸發「存下截圖」</label>
-    <div class="hint">讓操作 Kindle 頁面的測試工具要求截圖，截圖直接送到這台電腦上的接收程式（127.0.0.1:8765，<code>tests/tools/receive-fixtures.js</code>），用來製作測試用的截圖。頁面只會知道成功或失敗，拿不到截圖。只存在這台電腦，立即生效；不做開發請保持關閉。</div>
+    <label class="check"><input type="checkbox" id="devCapture" /> 允許測試工具觸發「存下頁面資料」</label>
+    <div class="hint">讓操作 Kindle 頁面的測試工具要求目前這一頁的頁面資料，直接送到這台電腦上的接收程式（127.0.0.1:8765，<code>tests/tools/receive-pages.js</code>），用來除錯。頁面只會知道成功或失敗，拿不到資料。資料裡有書的字型輪廓，不要放進 repo。只存在這台電腦，立即生效；不做開發請保持關閉。</div>
   </details>
 
   <script src="options.js"></script>

@@ -1,107 +1,256 @@
-// Detects page turns in Kindle Cloud Reader and tells the background worker.
-// The reader re-renders the page area on every turn, so a debounced
-// MutationObserver plus arrow-key / click hints is enough for a prototype.
-//
-// The top frame also draws the translation overlay: one box per text block,
-// positioned from the fractions the background worker sends.
+// Kindle Cloud Reader page script (top frame). Three jobs:
+// - Keep the page data the reader fetches, which page-hook.js copies over
+//   (see page-render.js and docs/page-pipeline-v2.md).
+// - Notice when the reader shows another screen (its page image changes),
+//   work out which screen it is by drawing candidates from that data and
+//   comparing pixels, and tell the background ("pageShown").
+// - Draw the translation overlay: one box per paragraph (per column it
+//   spans), placed over the reader's page image.
 
 // Guard against double injection (manifest + background retry injection).
 if (window.__kindleTranslatorLoaded) throw new Error("already loaded");
 window.__kindleTranslatorLoaded = true;
 
-const IS_TOP = window.top === window;
-const TURN_MSG = "kindle-translator-turn";
+const RENDER_MSG = "kindle-translator-render";
 const DEV_CAPTURE = "kindle-translator-dev-capture";
+const PAGE_IMG = ".kg-full-page-img img";
+// Layouts (font size, theme, window size…) kept at once, and screens per
+// layout: changing a setting starts a new layout, and the reader keeps a
+// dozen screens or so around the one it shows.
+const MAX_LAYOUTS = 2;
+const MAX_SCREENS = 40;
+// The next screen starts right after this one ends; a bigger jump means the
+// batch with the screen in between hasn't arrived.
+const MAX_SCREEN_GAP = 5;
 
-let timer = null;
-let pendingReason = null;
+// ---- Page data ----
 
-// userAction: a key/click/wheel/resize that may have turned the page, so the
-// current overlay is stale. Plain DOM churn (toolbar fading, progress updates)
-// only asks for a re-check; the background skips it if the screen is unchanged.
-function notify(reason, userAction = true) {
-  // Reloading the extension leaves this script running but cut off. Doing
-  // nothing then matters: hiding the overlay without being able to ask the
-  // background to redraw it left the page in English.
-  if (!chrome.runtime?.id) return;
-  if (userAction && !IS_TOP) {
-    // The reader content may live in an iframe; the top frame owns the
-    // overlay, so it hides it and reports the turn itself.
-    window.top.postMessage({ type: TURN_MSG, reason }, "*");
+// key → { key, params, pages: Map(start → screen) }
+const layouts = new Map();
+
+// Each screen's fonts: { fonts, paths (Path2D cache) } of the batch it came
+// in. Glyph ids are only good within one response: each batch numbers the
+// glyphs it carries afresh, so fonts must never be merged across batches.
+const fontsOf = new WeakMap();
+
+function addBatch(url, buf) {
+  let batch;
+  try {
+    batch = parseRender(new Uint8Array(buf), url);
+  } catch (err) {
+    pageLog(`閱讀器的頁面資料看不懂：${err.message}`);
     return;
   }
-  if (userAction) onTurnHint();
-  // A page turn re-renders the page right after the click/key, so "dom" would
-  // otherwise overwrite the user action and the background wouldn't cancel the
-  // in-flight request.
-  if (userAction || !pendingReason) pendingReason = reason;
-  clearTimeout(timer);
-  // Wait for the page-turn animation and image rendering to settle.
-  timer = setTimeout(() => {
-    const sent = pendingReason;
-    pendingReason = null;
-    try {
-      chrome.runtime.sendMessage({ type: "pageTurned", reason: sent });
-    } catch (_) {
-      // Extension was reloaded; this content script is orphaned.
-    }
-  }, 1200);
+  const layout = layouts.get(batch.key) ?? { key: batch.key, params: batch.params, pages: new Map() };
+  layouts.delete(batch.key); // re-added last: newest layout last
+  layouts.set(batch.key, layout);
+  const fonts = { fonts: batch.fonts, paths: new Map() };
+  for (const p of batch.pages) {
+    layout.pages.set(p.startPositionId, p);
+    fontsOf.set(p, fonts);
+  }
+  // Keep the screens nearest the one shown (or the newest), the layouts used last.
+  const near = shown?.key === layout.key ? shown.start : batch.pages[0].startPositionId;
+  if (layout.pages.size > MAX_SCREENS) {
+    const far = [...layout.pages.keys()].sort((a, b) => Math.abs(b - near) - Math.abs(a - near));
+    for (const k of far.slice(0, layout.pages.size - MAX_SCREENS)) layout.pages.delete(k);
+  }
+  for (const key of [...layouts.keys()]) {
+    if (layouts.size <= MAX_LAYOUTS) break;
+    if (key !== shown?.key && key !== layout.key) layouts.delete(key);
+  }
+  pageLog(`收到閱讀器的頁面資料：${batch.pages.length} 個畫面（${Math.round(buf.byteLength / 1024)} KB）`);
+  // A screen that couldn't be found may be in this batch.
+  if (!shown && failed) identify();
 }
 
-document.addEventListener(
-  "keydown",
-  (e) => {
-    if (["ArrowLeft", "ArrowRight", "PageUp", "PageDown", " ", "Enter"].includes(e.key)) notify("key");
-  },
-  true
-);
+// ---- Which screen the reader shows ----
 
-document.addEventListener("click", (e) => isToggle(e.target) || notify("click"), true);
+let shown = null; // { key, start, end, asin, revision, width, height, fill, ink }
+let shownSrc = null; // the page image it was identified from
+let lastStart = null; // the previous screen: candidates are tried nearest first
+let failed = null; // why the screen couldn't be identified
+let identifying = Promise.resolve();
+let latest = 0; // the newest identification; older ones give way
 
-document.addEventListener("wheel", () => notify("wheel"), { capture: true, passive: true });
+function pageImage() {
+  return document.querySelector(PAGE_IMG);
+}
 
-// The reader fires resize events when its toolbar slides in or out, without
-// the page moving. Only a real change of the top window's size moves the
-// text; anything else is just a re-check, which keeps the overlay up.
-let lastSize = `${innerWidth}x${innerHeight}`;
-window.addEventListener("resize", () => {
-  const size = `${innerWidth}x${innerHeight}`;
-  const changed = size !== lastSize;
-  lastSize = size;
-  if (IS_TOP && changed) notify("resize");
-  else notify("dom", false);
-});
+// Every page turn (and every re-render after a settings change) gives the
+// page image a new blob URL. The overlay goes at once, before the new screen
+// paints: it belongs to the screen that's gone.
+function checkImage() {
+  const img = pageImage();
+  const src = img?.src || null;
+  if (src === shownSrc) return;
+  shownSrc = src;
+  if (shown) lastStart = shown.start;
+  shown = null;
+  clearOverlay();
+  if (src) identify();
+}
 
-new MutationObserver((mutations) => {
-  // Ignore tiny changes (cursor blink, tooltips); react to real re-renders.
-  let significant = 0;
-  for (const m of mutations) {
-    if (isOverlayNode(m.target) || [...m.addedNodes, ...m.removedNodes].some(isOverlayNode)) continue;
-    significant += m.addedNodes.length + m.removedNodes.length;
-    if (m.type === "attributes" && (m.attributeName === "src" || m.attributeName === "style")) significant++;
+function identify() {
+  const mine = ++latest;
+  identifying = (async () => {
+    const img = pageImage();
+    if (!img) return;
+    try {
+      await loaded(img);
+      const found = await findScreen(img);
+      if (mine !== latest) return;
+      if (!found) {
+        failed = layouts.size ? "閱讀器的頁面資料裡找不到目前這一頁" : "還沒收到閱讀器的頁面資料，請重新整理 Kindle 分頁";
+        report({ error: failed });
+        return;
+      }
+      shown = screenInfo(found.layout, found.page);
+      failed = null;
+      report({ page: shown, tried: found.tried, ms: found.ms });
+    } catch (err) {
+      if (mine !== latest) return;
+      failed = `辨識目前這一頁失敗：${err.message}`;
+      report({ error: failed });
+    }
+  })();
+  return identifying;
+}
+
+function loaded(img) {
+  if (img.complete && img.naturalWidth) return Promise.resolve();
+  return new Promise((resolve, reject) => {
+    img.addEventListener("load", resolve, { once: true });
+    img.addEventListener("error", () => reject(new Error("書頁圖片載入失敗")), { once: true });
+  });
+}
+
+// Compare the reader's image with the screens of each layout, newest layout
+// first, nearest the previous screen first.
+async function findScreen(img) {
+  const started = performance.now();
+  const bitmap = await createImageBitmap(img);
+  const canvas = new OffscreenCanvas(bitmap.width, bitmap.height);
+  const ctx = canvas.getContext("2d");
+  ctx.drawImage(bitmap, 0, 0);
+  const shot = { width: bitmap.width, height: bitmap.height, data: ctx.getImageData(0, 0, bitmap.width, bitmap.height).data };
+  let tried = 0;
+  for (const layout of [...layouts.values()].reverse()) {
+    const scale = scaleOf(layout);
+    // Readers mostly turn forward: after the screen itself, the ones after
+    // it before the ones as far before it.
+    const near = lastStart ?? 0;
+    const distance = (p) => (p.startPositionId >= near ? p.startPositionId - near : (near - p.startPositionId) * 1.5);
+    const candidates = [...layout.pages.values()].sort((a, b) => distance(a) - distance(b));
+    const hit = identifyScreen(shot, candidates, (p) => pixelsOf(layout, p, scale), scale);
+    if (hit) return { layout, page: hit.page, tried: tried + hit.tried, ms: Math.round(performance.now() - started) };
+    tried += candidates.length;
   }
-  if (significant >= 2) notify("dom", false);
-}).observe(document.documentElement, {
-  subtree: true,
-  childList: true,
-  attributes: true,
-  attributeFilter: ["src", "style"],
-});
+  return null;
+}
 
-// ---- Overlay (top frame only) ----
+function scaleOf(layout) {
+  return Number(layout.params.rasterScale) || 2;
+}
+
+function draw(page, scale, options) {
+  const { fonts, paths } = fontsOf.get(page);
+  return renderPage(page, fonts, scale, paths, options);
+}
+
+function pixelsOf(layout, page, scale) {
+  const canvas = draw(page, scale);
+  return canvas.getContext("2d").getImageData(0, 0, canvas.width, canvas.height).data;
+}
+
+function screenInfo(layout, page) {
+  return {
+    key: layout.key,
+    start: page.startPositionId,
+    end: page.endPositionId,
+    asin: layout.params.asin,
+    revision: layout.params.revision,
+    width: page.width,
+    height: page.height,
+    fill: cssColor(page.fillColor, "#ffffff"),
+    ink: cssColor(page.inkColor, "#000000"),
+  };
+}
+
+function report(msg) {
+  // Reloading the extension leaves this script running but cut off.
+  if (!chrome.runtime?.id) return;
+  chrome.runtime.sendMessage({ type: "pageShown", ...msg }).catch(() => {});
+}
+
+// A line for the side panel's log.
+function pageLog(text) {
+  if (!chrome.runtime?.id) return;
+  chrome.runtime.sendMessage({ type: "pageLog", text }).catch(() => {});
+}
+
+// What the background needs to translate a screen: where its paragraphs
+// are, and (`image`) the screen drawn for OCR. `next` asks for the screen
+// after `start` instead.
+async function pageData({ key, start, next, image }) {
+  const layout = layouts.get(key);
+  if (!layout) return { error: "這個版面的頁面資料已經不在了" };
+  let page = layout.pages.get(start);
+  if (next) {
+    const after = page && screenAfter([...layout.pages.values()], start);
+    page = after && after.startPositionId - page.endPositionId <= MAX_SCREEN_GAP ? after : null;
+  }
+  if (!page) return { error: next ? "頁面資料裡還沒有下一頁" : "頁面資料裡沒有這一頁" };
+  const out = { page: screenInfo(layout, page), paragraphs: pageParagraphs(page), columns: pageColumns(page) };
+  if (image) {
+    const scale = scaleOf(layout);
+    // Black on white whatever the theme: Tesseract reads light-on-dark text worse.
+    const blob = await draw(page, scale, { plain: true }).convertToBlob({ type: "image/png" });
+    out.image = `data:image/png;base64,${bytesToBase64(new Uint8Array(await blob.arrayBuffer()))}`;
+    out.scale = scale;
+  }
+  return out;
+}
+
+function bytesToBase64(bytes) {
+  let bin = "";
+  for (let i = 0; i < bytes.length; i += 0x8000) bin += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
+  return btoa(bin);
+}
+
+// Development aid: the shown screen's page data (with just the glyphs it
+// uses), to debug or test with on this computer. It holds the book's font
+// outlines, so it never goes into the repo.
+function dumpPage() {
+  if (!shown) return { error: failed || "還不知道目前是哪一頁" };
+  const layout = layouts.get(shown.key);
+  const page = layout?.pages.get(shown.start);
+  if (!page) return { error: "頁面資料裡沒有這一頁" };
+  const fonts = {};
+  const own = fontsOf.get(page).fonts;
+  for (const run of page.children.filter((c) => c.type === "run")) {
+    const font = own[run.fontKey];
+    if (!font) continue;
+    const f = (fonts[run.fontKey] ??= { unitsPerEm: font.unitsPerEm, glyphs: {} });
+    for (const g of run.glyphs || []) if (font.glyphs[g]) f.glyphs[g] = font.glyphs[g];
+  }
+  return { filename: `kindle-${shown.asin || "book"}-${shown.start}.json`, data: { params: layout.params, page, fonts } };
+}
+
+// ---- Overlay ----
 
 let root = null;
-let turn = 0; // bumped on every page-turn hint; stale overlays are dropped
 let enabled = true; // the side panel's translation / original switch
+let lastOverlay = null; // the overlay message drawn, redrawn when the window resizes
 
 function isOverlayNode(node) {
   return (root !== null && (node === root || root.contains(node))) || isToggle(node);
 }
 
-// ---- Floating translation / original button (top frame only) ----
+// ---- Floating translation / original button ----
 
-// It sits in the bottom-right corner, outside the areas the background hashes
-// and OCRs, so its label changing doesn't look like a new page.
+// It sits in the bottom-right corner, outside the book page, so it never
+// covers text.
 let toggle = null;
 
 function isToggle(node) {
@@ -118,7 +267,7 @@ function ensureToggle() {
   Object.assign(toggle.style, {
     position: "fixed",
     right: "16px",
-    bottom: "8px", // ~32px tall: stays below the OCR crop (bottom 6%) in a 540px+ tall window
+    bottom: "8px",
     zIndex: "2147483647",
     padding: "6px 16px",
     border: "1px solid rgba(128,128,128,.6)",
@@ -149,11 +298,6 @@ function showToggle() {
   t.title = enabled ? "暫時隱藏譯文（Kindle 翻譯）" : "把譯文蓋回書頁上（Kindle 翻譯）";
 }
 
-function onTurnHint() {
-  turn++;
-  clearOverlay();
-}
-
 function ensureRoot() {
   if (root) return root;
   document.getElementById("kindle-translator-overlay")?.remove(); // left by a script orphaned by a reload
@@ -165,47 +309,80 @@ function ensureRoot() {
     zIndex: "2147483647",
     pointerEvents: "none", // clicks still reach the reader (page turns, menus)
   });
+  if (!enabled) root.style.display = "none";
   document.documentElement.append(root);
   return root;
 }
 
 function clearOverlay() {
   root?.replaceChildren();
+  lastOverlay = null;
 }
 
 // Turning the switch to "original" only hides the overlay, so switching back
-// shows the same page's translation instantly (the background then checks
-// it still matches the screen).
+// shows the same page's translation instantly.
 function applyEnabled() {
   if (root) root.style.display = enabled ? "" : "none";
   showToggle();
 }
 
+// The overlay message's paragraphs (boxes in page pixels) as boxes in
+// viewport pixels, over where the reader draws the page image now. A
+// paragraph that runs from one column into the next gets one box per column,
+// its text split between them by their line counts.
+function overlayBoxes(msg) {
+  const img = pageImage();
+  if (!img) return null;
+  const r = img.getBoundingClientRect();
+  if (!(r.width > 0) || !(r.height > 0)) return null;
+  const sx = r.width / msg.size.width;
+  const sy = r.height / msg.size.height;
+  const out = [];
+  for (const b of msg.blocks) {
+    const parts = splitText(b.text, b.boxes.map((x) => x.lines || 1));
+    b.boxes.forEach((box, i) => {
+      if (!parts[i]) return;
+      out.push({
+        kind: b.kind,
+        text: parts[i],
+        lines: box.lines || 1,
+        bg: msg.bg,
+        fg: b.fg,
+        rect: { x0: r.left + box.x0 * sx, y0: r.top + box.y0 * sy, x1: r.left + box.x1 * sx, y1: r.top + box.y1 * sy },
+      });
+    });
+  }
+  return out;
+}
+
+function drawOverlay(msg) {
+  const boxes = overlayBoxes(msg);
+  if (!boxes) return "看不到書頁圖片";
+  if (!boxes.length) return "這一頁沒有可以畫的譯文";
+  showOverlay(boxes);
+  lastOverlay = msg;
+  return null;
+}
+
 function showOverlay(blocks) {
   const el = ensureRoot();
   el.replaceChildren();
-  const vw = window.innerWidth;
-  const vh = window.innerHeight;
   const pad = 3; // cover anti-aliased edges of the original glyphs
-  const rects = blocks.map((b) => ({ x0: b.box[0] * vw, y0: b.box[1] * vh, x1: b.box[2] * vw, y1: b.box[3] * vh }));
+  const rects = blocks.map((b) => b.rect);
   const body = blocks.map((b, i) => ({ b, r: rects[i] })).filter(({ b }) => b.kind !== "heading");
-  // Height of one line of the original text. Claude reports each block's line
-  // count; guessing it from box heights alone failed on pages split into a
-  // few large blocks (every block looked "one line tall").
-  const perLine = body.filter(({ b }) => b.lines).map(({ b, r }) => (r.y1 - r.y0) / b.lines).sort((a, c) => a - c);
-  const lineHeight = perLine.length
-    ? perLine[perLine.length >> 1]
-    : Math.min(...body.map(({ r }) => r.y1 - r.y0)); // blocks cached before `lines` existed
+  // Height of one line of the original text, from the paragraphs' own line counts.
+  const perLine = body.map(({ b, r }) => (r.y1 - r.y0) / b.lines).sort((a, c) => a - c);
+  const lineHeight = perLine.length ? perLine[perLine.length >> 1] : Math.min(...rects.map((r) => r.y1 - r.y0));
   const boxes = [];
   blocks.forEach((b, i) => {
     const r = rects[i];
     // Single lines (dialogue, short quotes) get a tighter line-height and more
     // width; with the paragraph line-height of 1.5 they shrank.
-    const single = b.kind !== "heading" && (b.lines ? b.lines === 1 : r.y1 - r.y0 < lineHeight * 1.6);
-    // Claude's boxes hug the glyphs, some tighter than others, which left no
-    // room for a full line. Grow each box into the blank space between it and
-    // its neighbours in the same column: halfway to them, at most half a line,
-    // and not at all past the first/last block (title bar, progress bar).
+    const single = b.kind !== "heading" && b.lines === 1;
+    // The boxes hug the glyphs, which leaves no room for a full line. Grow
+    // each box into the blank space between it and its neighbours in the same
+    // column: halfway to them, at most half a line, and not at all past the
+    // first/last block (title bar, progress bar).
     const { above, below } = verticalRoom(rects, i, lineHeight / 2);
     const top = r.y0 - above;
     const height = r.y1 - r.y0 + above + below;
@@ -284,13 +461,14 @@ function fitText(box) {
   return lo;
 }
 
-// Where the reader draws the book (one image per page, two side by side on
-// a spread), in CSS pixels, so the background OCRs just that area: a fixed
-// share of the screen cut through the first line in tall windows and took in
-// the title bar in short ones. page is null in a reader mode without images.
+// Where the reader draws the book, in CSS pixels, for the vision engine's
+// screenshot: the page image, or the largest images on screen when the
+// reader draws pages some other way. page is null when there's none.
 function pageGeometry() {
   let page = null;
-  for (const el of document.querySelectorAll("img, canvas")) {
+  const own = pageImage();
+  const candidates = own ? [own] : [...document.querySelectorAll("img, canvas")];
+  for (const el of candidates) {
     if (root?.contains(el)) continue;
     const r = el.getBoundingClientRect();
     // Skip icons, covers in menus and anything off screen.
@@ -300,13 +478,11 @@ function pageGeometry() {
       ? { left: Math.min(page.left, r.left), top: Math.min(page.top, r.top), right: Math.max(page.right, r.right), bottom: Math.max(page.bottom, r.bottom) }
       : { left: r.left, top: r.top, right: r.right, bottom: r.bottom };
   }
-  // Whole pixels: the fingerprint's size follows this box, and a sub-pixel
-  // wobble between two reports must not make the same page look different.
   if (page) for (const k of Object.keys(page)) page[k] = Math.round(page[k]);
   return { viewport: { width: innerWidth, height: innerHeight }, dpr: window.devicePixelRatio || 1, page };
 }
 
-if (IS_TOP) {
+if (window.top === window) {
   chrome.storage.sync.get({ overlay: true }).then((v) => {
     enabled = v.overlay;
     applyEnabled();
@@ -318,21 +494,39 @@ if (IS_TOP) {
   });
 
   window.addEventListener("message", (e) => {
-    if (e.data?.type === TURN_MSG) notify(e.data.reason || "frame");
-    // A test tool driving this page asks for a test screenshot (the
-    // background refuses unless the options page's developer switch is on).
-    if (e.data?.type === DEV_CAPTURE && e.source === window) {
+    if (e.source !== window) return;
+    // Page data from page-hook.js, in the page's own world.
+    // (An ArrayBuffer from the page's world isn't an instance of this world's.)
+    if (e.data?.type === RENDER_MSG && Object.prototype.toString.call(e.data.buf) === "[object ArrayBuffer]" && typeof e.data.url === "string") {
+      let path = "";
+      try {
+        path = new URL(e.data.url).pathname;
+      } catch (_) {}
+      if (RENDER_PATH_RE.test(path)) addBatch(e.data.url, e.data.buf);
+    }
+    // A test tool driving this page asks for the page data (the background
+    // refuses unless the options page's developer switch is on).
+    if (e.data?.type === DEV_CAPTURE) {
       const { id, name } = e.data;
       const reply = (r) => window.postMessage({ type: `${DEV_CAPTURE}-result`, id, ...r }, location.origin);
       chrome.runtime.sendMessage({ type: "devCapture", name }).then(reply, (err) => reply({ ok: false, error: String(err?.message || err) }));
     }
   });
 
-  // Reply once the change is on screen: the background takes a screenshot
-  // next, and a fixed short wait sometimes caught the old overlay still
-  // painted (a large page at 3x takes a while), so OCR read our own Chinese.
-  // A frame callback runs before the next paint; the second one runs after
-  // it. The timeout covers a hidden tab, which doesn't paint at all.
+  new MutationObserver((mutations) => {
+    if (mutations.every((m) => isOverlayNode(m.target))) return;
+    checkImage();
+  }).observe(document.documentElement, { subtree: true, childList: true, attributes: true, attributeFilter: ["src"] });
+
+  // The page image moves with the window; keep the boxes over it.
+  window.addEventListener("resize", () => {
+    if (lastOverlay) drawOverlay(lastOverlay);
+  });
+
+  // Reply once the change is on screen: the vision engine takes a screenshot
+  // next, and must not catch our own translation in it. A frame callback runs
+  // before the next paint; the second one runs after it. The timeout covers a
+  // hidden tab, which doesn't paint at all.
   const afterPaint = (reply) => {
     let done = false;
     const send = () => done || ((done = true), reply());
@@ -342,24 +536,43 @@ if (IS_TOP) {
   };
 
   chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
-    if (msg.type === "clearOverlay") {
-      clearOverlay();
-      return afterPaint(() => sendResponse({ turn }));
-    } else if (msg.type === "debugLog") {
-      console.log(`[Kindle 翻譯] ${msg.text}`);
-    } else if (msg.type === "geometry") {
-      sendResponse(pageGeometry());
-    } else if (msg.type === "overlayState") {
-      sendResponse({ shown: enabled && !!root?.childElementCount });
-    } else if (msg.type === "overlay") {
-      if (msg.turn !== undefined && msg.turn !== turn) {
-        sendResponse({ shown: false, reason: "請求期間翻頁了，已丟棄舊頁的譯文" });
-      } else if (!msg.blocks.length) {
-        sendResponse({ shown: false, reason: "Claude 沒有在這張截圖裡找到內文區塊" });
-      } else {
-        showOverlay(msg.blocks);
+    switch (msg.type) {
+      case "clearOverlay":
+        clearOverlay();
+        return afterPaint(() => sendResponse({}));
+      case "debugLog":
+        console.log(`[Kindle 翻譯] ${msg.text}`);
+        return;
+      case "geometry":
+        sendResponse(pageGeometry());
+        return;
+      case "overlayState":
+        sendResponse({ shown: enabled && !!root?.childElementCount });
+        return;
+      case "currentPage":
+        identifying.then(() => sendResponse(shown ? { page: shown } : { error: failed || "還不知道目前是哪一頁" }));
+        return true;
+      case "pageData":
+        pageData(msg).then(sendResponse, (err) => sendResponse({ error: String(err?.message || err) }));
+        return true;
+      case "dumpPage":
+        sendResponse(dumpPage());
+        return;
+      case "overlay": {
+        if (!shown || shown.key !== msg.page?.key || shown.start !== msg.page?.start) {
+          sendResponse({ shown: false, reason: "畫面已經換頁，這份譯文不畫" });
+          return;
+        }
+        const problem = drawOverlay(msg);
+        if (problem) {
+          sendResponse({ shown: false, reason: problem });
+          return;
+        }
         return afterPaint(() => sendResponse({ shown: true }));
       }
     }
   });
+
+  // The screen already showing when this script starts (injected into an open tab).
+  checkImage();
 }

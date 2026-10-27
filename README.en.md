@@ -2,32 +2,25 @@
 
 # Kindle Auto-Translate (Chrome extension)
 
-Captures the page currently shown in Kindle Cloud Reader (read.amazon.com and others), reads the text with local OCR (Tesseract) and finds paragraphs and figures with the DocLayout-YOLO layout model, and has Claude Haiku translate it into Traditional Chinese, with Sonnet reviewing the translation. The translation is drawn directly over the original text on the page, and also shown in Chrome's side panel.
+Reads Kindle Cloud Reader's own page data (read.amazon.com and others) to know which page is on screen and which words form a paragraph, reads the text with local OCR (Tesseract), and has Claude Haiku translate it into Traditional Chinese, with Sonnet reviewing the translation. The translation is drawn directly over the original text on the page, and also shown in Chrome's side panel. While you read a page, the next one is translated ahead, so it's there as soon as you turn to it.
 
 ![Example: a two-page spread of Build a Reasoning Model (From Scratch), with the body text and captions translated in place and figures 1.1 and 1.2 left as they are, and the side panel on the right](docs/example.png)
 
-> Tested on Kindle Cloud Reader's two-page layout: the translation covers the original text about 10 seconds after a page turn. When the overlay doesn't appear, the side panel's status line shows the reason in red, and the log below it shows each step.
+> Reading on page by page, from the second page the translation is there as soon as you turn; the first page, or a page jumped or turned back to that wasn't translated, takes 10–15 seconds. When the overlay doesn't appear, the side panel's status line shows the reason in red, and the log below it shows each step.
 
 The extension's interface is in Chinese; the labels quoted below are followed by their English meaning. The target language can be changed in the options page.
 
-## Detecting the layout with a vision model
+## Using the reader's own page data
 
-Kindle Cloud Reader shows pages as images, with no text or layout to read, so the extension works from screenshots. OCR alone only says where each line of text is: it can't tell which lines form a paragraph, which line is a heading, or which words are actually labels inside a figure.
+Kindle Cloud Reader shows book pages as images, but before drawing them it fetches page data from Amazon: where each line of text goes, its font, colour and paragraph, where the illustrations are, and the glyph outlines. From 2.0 the extension listens in on that data (it never requests anything from Amazon itself) and uses it for three things:
 
-So from 1.0 the extension runs a vision model, [DocLayout-YOLO](https://github.com/opendatalab/DocLayout-YOLO), in the browser to detect the layout. It's an object-detection model trained on document pages, and it draws boxes around:
+- **Knowing which page is on screen**: it draws the candidate pages from the data and compares them pixel by pixel with the image the reader shows; the one identical outside the illustrations is the page. The toolbar, the cursor or a menu popping up are never taken for a page turn.
+- **Knowing which words form a paragraph, what's a heading, where the illustrations are**: straight from the book's own layout, no guessing. Text inside illustrations isn't translated, so the original picture shows.
+- **Giving OCR a clean page**: no toolbar, cursor or leftover translation. The glyphs in the data are numbered, not text, so Tesseract still reads the words.
 
-- paragraphs, headings, headers and footers
-- figures and figure captions
-- tables, table captions and table footnotes
-- formulas and formula captions
+Translations are kept per paragraph, by the paragraph's position in the book, whatever the font size or window size: after changing either, paragraphs already read aren't translated again.
 
-The extension then puts each OCR line into the box it falls in:
-
-- Lines in the same box become one paragraph, so paragraphs and headings follow the book's own layout.
-- Text inside figures, tables and formulas isn't translated, so the original figure shows instead of being covered with translated labels.
-- Captions and headings get boxes of their own, so their size and position don't mix with the body text.
-
-The model runs on your GPU through [ONNX Runtime Web](https://github.com/microsoft/onnxruntime) (WebGPU), in about 0.25 seconds for a two-page spread, and the screenshot never leaves your computer. The model file is 75 MB; it's downloaded from Hugging Face on the first translation and kept in the browser. The approach follows the PDF translator [BabelDOC](https://github.com/funstory-ai/BabelDOC).
+1.x did all this with screenshots, a coarse screen fingerprint and the DocLayout-YOLO layout model (WebGPU, 75 MB); 2.0 replaces all of it and no longer needs WebGPU or a model download.
 
 ## Install
 
@@ -41,30 +34,37 @@ The model runs on your GPU through [ONNX Runtime Web](https://github.com/microso
 
 1. Open Kindle Cloud Reader and open a book.
 2. Click the extension's icon in the toolbar to open the side panel.
-3. Click 「翻譯這一頁」 (translate this page) or press Alt+T. With 「翻頁自動翻譯」 (translate on page turn) checked, a page is translated about 1 second after you turn to it. When the current page is already translated and the screen hasn't changed, the button becomes 「重新翻譯本頁」 (retranslate this page) and skips the cache.
-4. The translation covers the book's paragraphs in place (font size fitted to each box, colors matched to the reader theme). The side panel's 「書頁顯示：譯文｜原文」 (page shows: translation | original) switch, or the small 「顯示原文／顯示譯文」 (show original / show translation) button in the page's bottom-right corner, or Alt+O, toggles between them at any time; switching back to the translation is instant, with no new request. Turning or clicking the page clears the overlay until the new page is translated.
+3. Click 「翻譯這一頁」 (translate this page) or press Alt+T. With 「翻頁自動翻譯」 (translate on page turn) checked, a page not yet translated is translated after you've stayed on it about 1 second; a translated one shows at once. When the current page's translation is on screen, the button becomes 「重新翻譯本頁」 (retranslate this page) and skips the cache.
+4. The translation covers the book's paragraphs in place (font size fitted to each box, colors matched to the reader theme). The side panel's 「書頁顯示：譯文｜原文」 (page shows: translation | original) switch, or the small 「顯示原文／顯示譯文」 (show original / show translation) button in the page's bottom-right corner, or Alt+O, toggles between them at any time; switching back to the translation is instant, with no new request. Turning the page clears the overlay until the new page is translated.
 5. The newest page's translation is at the top of the side panel, with a 「複製」 (copy) button.
 
 ## How it works and caveats
 
 - Pages are only translated automatically while the side panel is open, so no API credit is spent in the background.
-- A page is identified by a coarse fingerprint of its text area in the screenshot (excluding the title bar, progress bar and page arrows; shrunk to black and white and matched approximately, so the toolbar or hover effects don't count as a page turn), so the same page is never sent twice; going back to a translated page uses the cache (cleared when the browser closes). Translation starts about 1.2 seconds after the last page turn, so pages flipped past quickly are never sent. If you turn the page mid-translation, that page finishes in the background and goes into the cache (one page at most; beyond that the oldest is cancelled) while the new page starts right away; turning back to a page still translating in the background waits for it instead of sending it again.
+- In a tab where the book was opened before the extension was loaded (or reloaded), the page on screen is only recognised once the reader fetches its next batch of page data; the side panel says so, and reloading the Kindle tab is quickest.
+- Translation starts about 1.2 seconds after the last page turn, so pages flipped past quickly are never sent. If you turn the page mid-translation, that page finishes in the background and goes into the cache (one page at most; beyond that the oldest is cancelled) while the new page starts right away; turning back to a page still translating waits for it instead of sending it again. The cache is cleared when the browser closes.
+- **Translate the next page ahead** (options page, on by default): about 2 seconds after the current page's translation is drawn, the next page is translated. Reading on page by page this costs nothing extra; when you stop reading, jump or turn back, pages translated ahead but never read are still billed. Modes 1 and 2 only.
 - The options page's 「翻譯方式」 (translation mode) has three choices:
-  - **1. Fast**: Tesseract.js reads the text and its position in the browser (a two-page spread is first split into columns at the blank gutter), while the DocLayout-YOLO layout model finds paragraphs, headings, captions, figures and tables on the GPU (WebGPU): text inside figures, tables and formulas stays in the original, the rest is grouped into paragraphs by the model's blocks, and only the text is sent to Claude Haiku 5.5. On a two-page spread both columns are sent in parallel. About 9 seconds per page (OCR about 3) and about 0.1 US cent; the screenshot never leaves your computer. Only the English OCR model is bundled for now.
-  - **2. Polished (default)**: as 1, then Sonnet 5.5 reviews Haiku's translation, returning only the paragraphs it changes; the changes are listed in the side panel's log. In testing the review took 2–3 seconds per column, about 10 seconds for the page, at about 1 cent per page.
-  - In 1 and 2 a column is occasionally declined on copyright grounds; that column is then translated as text by Opus 5.5 instead (without a review), about 15 seconds for the page.
-  - **3. Read the image**: the screenshot goes straight to Claude Opus 5.5, which finds the paragraphs and translates them, and can handle books in other languages. 20+ seconds per page, effort defaults to low. In testing, Sonnet 5.5 and Haiku 5.5 declined book-page screenshots on copyright grounds, so this mode uses Opus only. When a safety classifier declines Opus 5.5, the request is retried on Opus 5, then Opus 4.8.
-- Translation only contacts api.anthropic.com; the layout model is also downloaded from Hugging Face on the first translation (see below). The API key is kept in Chrome sync storage.
-- In Opus mode the screenshot is scaled to at most 2576 px on the long edge and 3.7 MP in total before sending; anything larger gets scaled again by the API and the coordinates no longer line up.
+  - **1. Fast**: Tesseract.js reads each column's text in the browser, the reader's page data splits it into paragraphs, and only the text is sent to Claude Haiku 5.5. On a two-page spread both columns are sent in parallel. About 0.1 US cent per page; the page image never leaves your computer. Only the English OCR model is bundled for now.
+  - **2. Polished (default)**: as 1, then Sonnet 5.5 reviews Haiku's translation, returning only the paragraphs it changes; the changes are listed in the side panel's log. About 1 cent per page.
+  - In 1 and 2 a column is occasionally declined on copyright grounds; that column is then translated as text by Opus 5.5 instead (without a review).
+  - **3. Read the image**: the screenshot goes straight to Claude Opus 5.5, which finds the paragraphs and translates them, and can handle books in other languages. 20+ seconds per page, effort defaults to low, no translating ahead. In testing, Sonnet 5.5 and Haiku 5.5 declined book-page screenshots on copyright grounds, so this mode uses Opus only. When a safety classifier declines Opus 5.5, the request is retried on Opus 5, then Opus 4.8. The screenshot is scaled to at most 2576 px on the long edge and 3.7 MP in total before sending; anything larger gets scaled again by the API and the coordinates no longer line up.
+- The only server contacted is api.anthropic.com. The API key is kept in Chrome sync storage. The reader's page data is used inside the page to recognise and draw the current and next page, and is never sent anywhere.
 - Claude occasionally returns a summary instead of a translation, citing copyright. A summary triggers one automatic retry; if it is still a summary it is shown and labelled 「摘要」 (summary), but not cached.
-- Positions are per paragraph, not per line, and boxes are occasionally a little off. In OCR mode paragraphs follow DocLayout-YOLO's blocks; only lines the model doesn't cover (such as a line cut off at the page edge) are split by indentation, line spacing and short lines.
-- The DocLayout-YOLO model file is 75 MB. It's downloaded from Hugging Face on the first translation, verified, and kept in the browser; the first page waits for the download, with progress in the side panel. WebGPU is required. If the model can't run there is no fallback: the side panel shows the error in red and the page isn't translated.
+- Positions are per paragraph, not per line; a paragraph running from the left page into the right one gets its translation split in two by line count.
 - The translation boxes cover the page's highlights, and the original text under them. To add a highlight, switch to the original first (the bottom-right button or Alt+O), select the text and highlight it, then switch back to the translation.
-- Recognition gets worse when the book text is small; enlarge the reader font or the window.
+- The extension depends on Kindle Cloud Reader's unpublished page data format; if Amazon changes it, pages won't be recognised and the side panel will say so.
 - This translates page by page for your own reading. Don't use it to export book content in bulk; that violates Amazon's terms of use.
 
 ## Release notes
 
+- **2.0.0**: uses the reader's own page data, and translates the next page ahead.
+  - Listens in on the page data the reader fetches, draws the page from it and compares it pixel by pixel with the screen, so the page on screen is known exactly; no more screenshot fingerprints, and the toolbar or cursor no longer count as a page turn.
+  - Paragraphs, headings and illustrations come from the page data, replacing the DocLayout-YOLO layout model: no WebGPU needed, and no 75 MB download.
+  - OCR reads a clean page drawn from the data; the translation boxes sit exactly where the text is, in the reader theme's colours.
+  - Translations are cached per paragraph, so changing the font size or window size, or turning back, doesn't translate paragraphs already read again; a page turned away from mid-translation isn't wasted either.
+  - New: translate the next page ahead (on by default).
+  - The side panel's 存下截圖 (save screenshot) became 存下頁面資料 (save page data), for debugging.
 - **1.1.0**: OCR reads only the area where Kindle draws the book page.
   - The page reports where that is, instead of a fixed share of the screen, which cut off the chapter heading and first line in tall windows and took in the title bar in short ones. It now works the same at any window size, zoom or screen resolution.
   - The same-page check looks at the same area, so the toolbar sliding in and out no longer counts as a page turn.
@@ -103,22 +103,20 @@ The model runs on your GPU through [ONNX Runtime Web](https://github.com/microso
 The detailed design (in Chinese) is in [docs/design.md](docs/design.md).
 
 - `manifest.json`: Manifest V3 configuration
-- `content.js`: detects page turns on the Kindle page (keys, clicks, DOM changes) and draws the translation overlay
-- `background.js`: capture, OCR preprocessing, Claude API calls (structured outputs), color sampling, cache
-- `ocr-layout.js`: column detection and grouping OCR lines into paragraphs
-- `page-sig.js`: page fingerprints and the "same page?" comparison
-- `offscreen.html/js`: runs Tesseract and DocLayout-YOLO in an offscreen document (a service worker can't start a Web Worker)
-- `layout-model.js`: downloads, caches and runs DocLayout-YOLO on WebGPU
+- `page-hook.js`: wraps `fetch` in the Kindle page's own world and copies the reader's page data to the content script
+- `page-render.js`: unpacks the page data, draws pages from it, compares pixels, finds paragraphs and columns
+- `content.js`: keeps the page data on the Kindle page, recognises the page on screen, and draws the translation overlay
+- `background.js`: decides which page to translate, Claude API calls (structured outputs), the paragraph cache, translating ahead, the vision mode's screenshot
+- `ocr-layout.js`: puts OCR lines into paragraphs
+- `offscreen.html/js`: runs Tesseract in an offscreen document (a service worker can't start a Web Worker)
 - `sidepanel.html/js`: side panel UI
-- `options.html/js`: options page (API key, translation mode, effort, target language)
+- `options.html/js`: options page (API key, translation mode, translate ahead, effort, target language)
 - `vendor/tesseract/`: Tesseract.js 7.0.0, tesseract.js-core and the English model (Apache-2.0), all bundled in the extension rather than loaded from a CDN
-- `vendor/onnxruntime/`: the WebGPU build of ONNX Runtime Web 1.30.0 (MIT)
-- `vendor/doclayout/`: source, checksum and license (Apache-2.0) of the DocLayout-YOLO model; the model itself isn't in the repo
 - `tests/`: Node tests (see the next section)
 
 ## Development
 
-The tests use Node's built-in test runner and need Node 22 or later. The one package, `jpeg-js` for decoding JPEGs, is installed with `npm install` in the repo root the first time. Then:
+The tests use Node's built-in test runner and need Node 22 or later; there are no packages to install:
 
 ```bash
 npm test                                                  # everything
@@ -127,14 +125,11 @@ node --test --test-name-pattern="cache" "tests/**/*.test.js"  # tests whose name
 node --test --watch "tests/**/*.test.js"                  # rerun on every change
 ```
 
-The tests load the extension's files unchanged and replace everything around them (Chrome APIs, screenshots, OCR, the Claude API, the DOM) with fakes, so they need no browser, API key or network, and take about 15 seconds. `tests/fixtures/` holds a few real screenshots of public-domain books (saved with 存下截圖 in the side panel's log), used to test the fingerprint, crop, columns and colors. What Tesseract and the layout model actually output isn't covered; check that with real screenshots. How the tests are built is in section 9 of [docs/design.md](docs/design.md) (in Chinese).
-
-How to capture test screenshots in bulk is also in section 9 of docs/design.md.
+The tests load the extension's files unchanged and replace everything around them (Chrome APIs, the Kindle page, OCR, the Claude API, the DOM) with fakes, so they need no browser, API key or network, and take about 20 seconds. A synthetic book stands in for Kindle's page data (Amazon's fonts can't go into the repo), and a fake canvas that really fills pixels lets the pixel-by-pixel page recognition be tested too. What Tesseract actually reads and how the reader really draws aren't covered; check those on Kindle Cloud Reader itself. How the tests are built is in section 11 of [docs/design.md](docs/design.md) (in Chinese).
 
 After changing the extension, reload it on `chrome://extensions`, then reload the Kindle tab.
 
 ## Credits
 
-- [DocLayout-YOLO](https://github.com/opendatalab/DocLayout-YOLO) (OpenDataLab): the layout detection model, used through the ONNX export [wybxc/DocLayout-YOLO-DocStructBench-onnx](https://huggingface.co/wybxc/DocLayout-YOLO-DocStructBench-onnx) (Apache-2.0).
-- [BabelDOC](https://github.com/funstory-ai/BabelDOC): the choice of model, its preprocessing and class list follow BabelDOC.
-- [ONNX Runtime Web](https://github.com/microsoft/onnxruntime) (MIT) and [Tesseract.js](https://github.com/naptha/tesseract.js) (Apache-2.0).
+- [Tesseract.js](https://github.com/naptha/tesseract.js) (Apache-2.0).
+- 1.x detected layouts with [DocLayout-YOLO](https://github.com/opendatalab/DocLayout-YOLO) (OpenDataLab) on [ONNX Runtime Web](https://github.com/microsoft/onnxruntime) (MIT), following [BabelDOC](https://github.com/funstory-ai/BabelDOC).

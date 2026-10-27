@@ -4,7 +4,6 @@ const test = require("node:test");
 const assert = require("node:assert/strict");
 const { plain } = require("./helpers/load");
 const { startExtension } = require("./helpers/extension");
-const { screenUrl, THEMES, rng } = require("./helpers/images");
 
 function worker() {
   return startExtension({ panel: false }).ctx;
@@ -43,7 +42,8 @@ test.describe("splitParas", () => {
   });
 
   test("every paragraph ends up in exactly one chunk", () => {
-    const rand = rng("split");
+    let seed = 7;
+    const rand = () => ((seed = (seed * 48271) % 2147483647) / 2147483647);
     for (let n = 4; n < 30; n++) {
       const p = paras(Array.from({ length: n }, () => 1 + Math.floor(rand() * 200)));
       const ids = plain(ctx.splitParas(p, blocks(p.map(() => 0)))).flat().map((x) => x.id);
@@ -81,6 +81,12 @@ test.describe("isDeclined / isSummary", () => {
 
   test("a missing translations array is declined", () => {
     assert.equal(ctx.isDeclined({}, chunk), true);
+  });
+
+  test("isSummary: translated texts (OCR engine) labelled （摘要）", () => {
+    assert.equal(ctx.isSummary({ summarized: false, notes: "", texts: ["  （摘要）本章…"] }), true);
+    assert.equal(ctx.isSummary({ summarized: false, notes: "", texts: ["他寫了一份摘要。", ""] }), false);
+    assert.equal(ctx.isSummary({ summarized: false, texts: [] }), false, "no notes at all");
   });
 
   test("isSummary: flag, notes, or a block labelled （摘要）/(摘要", () => {
@@ -124,63 +130,6 @@ test.describe("parseReply", () => {
   });
 });
 
-test.describe("finishBlocks", () => {
-  async function image(theme) {
-    const ext = startExtension({ panel: false });
-    return { ctx: ext.ctx, img: await ext.ctx.prepareImage(screenUrl({ theme }), false) };
-  }
-  const rgb = ([r, g, b]) => `rgb(${r},${g},${b})`;
-
-  test("boxes become viewport fractions, clamped and ordered", async () => {
-    const { ctx, img } = await image("white");
-    const [b] = plain(ctx.finishBlocks([{ kind: "paragraph", text: " 譯文 ", lines: 2.6, x0: 900, y0: 500, x1: -40, y1: 100 }], img));
-    assert.deepEqual(b.box, [0, 100 / 600, 900 / 960, 500 / 600]);
-    assert.equal(b.text, "譯文");
-    assert.equal(b.lines, 3);
-    assert.equal(b.kind, "paragraph");
-  });
-
-  test("tiny, empty and blank blocks are dropped", async () => {
-    const { ctx, img } = await image("white");
-    const out = ctx.finishBlocks(
-      [
-        { text: "a", x0: 10, y0: 10, x1: 13, y1: 100 },
-        { text: "a", x0: 10, y0: 10, x1: 100, y1: 12 },
-        { text: "   ", x0: 10, y0: 10, x1: 100, y1: 100 },
-        { x0: 10, y0: 10, x1: 100, y1: 100 },
-        { text: "ok", x0: 10, y0: 10, x1: 100, y1: 100 },
-      ],
-      img
-    );
-    assert.equal(out.length, 1);
-  });
-
-  test("lines defaults to 1 when missing or nonsense", async () => {
-    const { ctx, img } = await image("white");
-    const out = plain(ctx.finishBlocks([{ text: "a", lines: "x", x0: 0, y0: 0, x1: 50, y1: 50 }, { text: "b", lines: 0, x0: 0, y0: 0, x1: 50, y1: 50 }], img));
-    assert.deepEqual(out.map((b) => b.lines), [1, 1]);
-  });
-
-  for (const theme of ["white", "sepia", "dark"]) {
-    test(`samples the ${theme} page background and ink around a text block`, async () => {
-      const { ctx, img } = await image(theme);
-      // A block over the text area of the synthetic page.
-      const [b] = plain(ctx.finishBlocks([{ text: "x", x0: 140, y0: 80, x1: 820, y1: 300 }], img));
-      assert.equal(b.bg, rgb(THEMES[theme].bg));
-      assert.equal(b.fg, rgb(THEMES[theme].ink));
-    });
-  }
-
-  test("a blank box falls back to black ink on light pages and white on dark", async () => {
-    for (const [theme, ink] of [["white", "rgb(0,0,0)"], ["dark", "rgb(255,255,255)"]]) {
-      const { ctx, img } = await image(theme);
-      // Below the text area: nothing but background.
-      const [b] = plain(ctx.finishBlocks([{ text: "x", x0: 140, y0: 540, x1: 820, y1: 580 }], img));
-      assert.equal(b.fg, ink);
-    }
-  });
-});
-
 test.describe("prompts and labels", () => {
   const ctx = worker();
 
@@ -220,13 +169,6 @@ test.describe("prompts and labels", () => {
     assert.equal(ctx.bytesToBase64(bytes), Buffer.from(bytes).toString("base64"));
   });
 
-  test("describeLayout counts the regions kept in the original", () => {
-    const layout = { regions: [[{ cls: "figure" }, { cls: "plain text" }], [{ cls: "table" }, { cls: "isolate_formula" }, { cls: "title" }]], ms: 42 };
-    const out = plain(ctx.describeLayout(layout));
-    assert.equal(out.level, "ok");
-    assert.match(out.text, /5 個區塊，3 個圖、表或公式保留原文，42 毫秒/);
-  });
-
   test("describeRefusal names the category, explanation, reply text and model", () => {
     const text = ctx.describeRefusal({
       model: "claude-opus-5-5",
@@ -250,187 +192,110 @@ test.describe("prompts and labels", () => {
   });
 });
 
-test.describe("page cache", () => {
-  // Random fingerprints far apart from each other.
-  function sig(seed) {
-    const rand = rng(String(seed));
-    const bytes = Buffer.alloc(32).map(() => Math.floor(rand() * 256));
-    return `16x16:${bytes.toString("base64")}`;
-  }
-
-  test("stores and finds a page by fingerprint", async () => {
-    const ext = startExtension({ panel: false });
-    const blocks = [{ text: "譯" }];
-    await ext.ctx.cacheSet(sig(1), blocks);
-    assert.deepEqual(plain(await ext.ctx.cacheGet(sig(1))), blocks);
-    assert.equal(await ext.ctx.cacheGet(sig(2)), undefined);
-  });
-
-  test("a near-identical fingerprint is the same page", async () => {
-    const ext = startExtension({ panel: false });
-    const a = await ext.ctx.pageSigOf(screenUrl({ page: "p1" }));
-    const b = await ext.ctx.pageSigOf(screenUrl({ page: "p1", toolbar: true }));
-    await ext.ctx.cacheSet(a, [{ text: "x" }]);
-    assert.deepEqual(plain(await ext.ctx.cacheGet(b)), [{ text: "x" }]);
-  });
-
-  test("storing the same page again replaces it instead of adding an entry", async () => {
-    const ext = startExtension({ panel: false });
-    await ext.ctx.cacheSet(sig(1), [{ text: "old" }]);
-    await ext.ctx.cacheSet(sig(1), [{ text: "new" }]);
-    assert.equal(ext.cachedPages(), 1);
-    assert.deepEqual(plain(await ext.ctx.cacheGet(sig(1))), [{ text: "new" }]);
-  });
-
-  test("an empty result is treated as a miss", async () => {
-    const ext = startExtension({ panel: false });
-    await ext.ctx.cacheSet(sig(1), []);
-    assert.equal(await ext.ctx.cacheGet(sig(1)), undefined);
-  });
-
-  test("concurrent writes all land", async () => {
-    const ext = startExtension({ panel: false });
-    await Promise.all([1, 2, 3, 4, 5].map((i) => ext.ctx.cacheSet(sig(i), [{ text: `p${i}` }])));
-    assert.equal(ext.cachedPages(), 5);
-    for (const i of [1, 2, 3, 4, 5]) assert.deepEqual(plain(await ext.ctx.cacheGet(sig(i))), [{ text: `p${i}` }]);
-  });
-
-  test("keeps the newest CACHE_PAGES pages and deletes the oldest's blocks", async () => {
-    const ext = startExtension({ panel: false });
-    const limit = ext.ctx.run("CACHE_PAGES");
-    for (let i = 0; i <= limit; i++) await ext.ctx.cacheSet(sig(i), [{ text: `p${i}` }]);
-    assert.equal(ext.cachedPages(), limit);
-    assert.equal(await ext.ctx.cacheGet(sig(0)), undefined);
-    assert.deepEqual(plain(await ext.ctx.cacheGet(sig(limit))), [{ text: `p${limit}` }]);
-    const pageKeys = [...ext.chrome.storage.session.data.keys()].filter((k) => k.startsWith("page:"));
-    assert.equal(pageKeys.length, limit);
-  });
-
-  test("a failed write doesn't block later ones", async () => {
-    const ext = startExtension({ panel: false });
-    const set = ext.chrome.storage.session.set;
-    ext.chrome.storage.session.set = async () => {
-      throw new Error("quota");
-    };
-    await assert.rejects(ext.ctx.cacheSet(sig(1), [{ text: "a" }]), /quota/);
-    ext.chrome.storage.session.set = set;
-    await ext.ctx.cacheSet(sig(2), [{ text: "b" }]);
-    assert.deepEqual(plain(await ext.ctx.cacheGet(sig(2))), [{ text: "b" }]);
-  });
-
-  test("swapLastSig returns the previous fingerprint", async () => {
-    const ext = startExtension({ panel: false });
-    assert.equal(await ext.ctx.swapLastSig("a"), undefined);
-    assert.equal(await ext.ctx.swapLastSig("b"), "a");
-  });
-
-  test("setShownSig tells the panel whether the button retranslates", async () => {
-    const ext = startExtension();
-    await new Promise((r) => setTimeout(r, 5)); // the panel's own initial pageState
-    ext.received.length = 0;
-    await ext.ctx.setShownSig("s");
-    await ext.ctx.setShownSig(null);
-    await ext.tick();
-    assert.deepEqual(plain(ext.msgs("pageState")), [{ type: "pageState", retranslate: true }, { type: "pageState", retranslate: false }]);
-    assert.equal(await ext.ctx.getShownSig(), undefined);
-  });
-});
-
-test.describe("capture", () => {
-  test("spaces screenshots at least CAPTURE_GAP_MS apart", async () => {
-    const ext = startExtension({ panel: false });
-    const times = [];
-    const orig = ext.chrome.tabs.captureVisibleTab;
-    ext.chrome.tabs.captureVisibleTab = async (...a) => {
-      times.push(Date.now());
-      return orig(...a);
-    };
-    await Promise.all([ext.ctx.capture(1), ext.ctx.capture(1), ext.ctx.capture(1)]);
-    const gap = ext.ctx.run("CAPTURE_GAP_MS") / require("./helpers/load").TIME_SCALE;
-    // Timers may fire a millisecond early.
-    for (let i = 1; i < times.length; i++) assert.ok(times[i] - times[i - 1] >= gap - 2, `gap ${times[i] - times[i - 1]} ms`);
-  });
-
-  test("a failed capture doesn't stall the queue", async () => {
-    const ext = startExtension({ panel: false });
-    const orig = ext.chrome._.screen;
-    ext.chrome._.screen = null;
-    await assert.rejects(ext.ctx.capture(1));
-    ext.chrome._.screen = orig;
-    assert.match(await ext.ctx.capture(1), /^data:image/);
-  });
-});
-
-test.describe("ocrCrop", () => {
+test.describe("screens and cache keys", () => {
   const ctx = worker();
-  const vp = { width: 1571, height: 974 };
+  const page = { key: "B0X|rev|Bookerly|10", start: 100, end: 400, asin: "B0X", revision: "rev" };
 
-  test("the page image's box as fractions of the viewport", () => {
-    // Measured in Kindle Cloud Reader: the page image at 157–1414 × 60–884.
-    const crop = plain(ctx.ocrCrop({ viewport: vp, page: { left: 157, top: 60, right: 1414, bottom: 884 } }));
-    assert.deepEqual(crop, { x0: 157 / 1571, y0: 60 / 974, x1: 1414 / 1571, y1: 884 / 974 });
+  test("a screen is its layout key and start", () => {
+    assert.equal(ctx.screenId(page), "B0X|rev|Bookerly|10|100");
+    assert.equal(ctx.screenId(null), null);
+    assert.equal(ctx.sameScreen(page, { ...page, end: 999, tabId: 3 }), true);
+    assert.equal(ctx.sameScreen(page, { ...page, start: 101 }), false);
+    assert.equal(ctx.sameScreen(page, { ...page, key: "other" }), false);
+    assert.equal(ctx.sameScreen(page, null), false);
+    assert.equal(ctx.sameScreen(null, null), false);
   });
 
-  test("clamped to the screen", () => {
-    const crop = plain(ctx.ocrCrop({ viewport: vp, page: { left: -20, top: -5, right: 1700, bottom: 1000 } }));
-    assert.deepEqual(crop, { x0: 0, y0: 0, x1: 1, y1: 1 });
+  test("a paragraph's key is the book and its position range, whatever the layout", () => {
+    assert.equal(ctx.paraKey(page, { start: 120, end: 180 }), "para:B0X:rev:120-180");
+    assert.equal(ctx.paraKey({ ...page, key: "other layout" }, { start: 120, end: 180 }), "para:B0X:rev:120-180");
+    assert.notEqual(ctx.paraKey({ ...page, revision: "rev2" }, { start: 120, end: 180 }), "para:B0X:rev:120-180");
   });
 
-  test("falls back to OCR_CROP without a usable page box", () => {
-    const fallback = ctx.run("OCR_CROP");
-    for (const g of [
-      undefined,
-      null,
-      { viewport: vp, page: null },
-      { page: { left: 0, top: 0, right: 100, bottom: 100 } },
-      { viewport: { width: 0, height: 0 }, page: { left: 0, top: 0, right: 100, bottom: 100 } },
-      { viewport: vp, page: { left: 100, top: 100, right: 200, bottom: 800 } }, // too narrow
-      { viewport: vp, page: { left: 100, top: 100, right: 1400, bottom: 150 } }, // too short
-    ]) {
-      assert.equal(ctx.ocrCrop(g), fallback, JSON.stringify(g));
-    }
+  test("a screen's record and vision result are keyed by layout and start", () => {
+    assert.equal(ctx.recordKey(page), "page:B0X|rev|Bookerly|10:100");
+    assert.equal(ctx.visionKey(page), "vision:B0X|rev|Bookerly|10:100");
+  });
+
+  test("describeScreen names the position range", () => {
+    assert.equal(ctx.describeScreen(page), "位置 100–400");
+  });
+
+  test("cachedTexts: every paragraph with text cached, or null", async () => {
+    const ext = startExtension({ panel: false });
+    const record = { paras: [{ start: 1, end: 5, source: "a" }, { start: 7, end: 9, source: "b" }, { start: 11, end: 12, source: "  " }] };
+    assert.equal(await ext.ctx.cachedTexts(page, record), null);
+    await ext.ctx.cacheWrite({ "para:B0X:rev:1-5": { text: "甲" } });
+    assert.equal(await ext.ctx.cachedTexts(page, record), null, "one is still missing");
+    await ext.ctx.cacheWrite({ "para:B0X:rev:7-9": { text: "乙" } });
+    assert.deepEqual(plain([...(await ext.ctx.cachedTexts(page, record))]), [
+      ["para:B0X:rev:1-5", "甲"],
+      ["para:B0X:rev:7-9", "乙"],
+    ]);
+    assert.deepEqual(plain([...(await ext.ctx.cachedTexts(page, { paras: [] }))]), [], "nothing to translate is complete");
+  });
+
+  test("the shown screen and the drawn one live in session storage", async () => {
+    const ext = startExtension();
+    await ext.ctx.setShown(page);
+    assert.deepEqual(plain(await ext.ctx.getShown()), page);
+    await ext.ctx.setShown(null);
+    assert.equal(await ext.ctx.getShown(), null);
+    await ext.ctx.setDrawn(page);
+    assert.equal(await ext.ctx.getDrawn(), ctx.screenId(page));
+    await ext.ctx.setDrawn(null);
+    assert.equal(await ext.ctx.getDrawn(), null);
+    await ext.tick();
+    assert.deepEqual(
+      ext.msgs("pageState").slice(-2).map((m) => m.retranslate),
+      [true, false]
+    );
+  });
+
+  test("deferred resolves from outside", async () => {
+    const d = ctx.deferred();
+    d.resolve(42);
+    assert.equal(await d.promise, 42);
   });
 });
 
-test.describe("fingerprint area", () => {
-  const geometry = { viewport: { width: 960, height: 600 }, dpr: 1, page: { left: 96, top: 60, right: 864, bottom: 540 } };
-  const dims = (sig) => sig.split(":")[0];
+test.describe("visionParas", () => {
+  const ctx = worker();
+  const page = { width: 300, height: 200, ink: "#acacac" };
+  const image = { width: 2000, height: 1400 };
+  const geometry = { viewport: { width: 1000, height: 700 }, page: { left: 200, top: 150, right: 800, bottom: 550 } };
 
-  test("follows the book page image, inset a few pixels", async () => {
-    const ext = startExtension({ panel: false });
-    const sig = await ext.ctx.pageSigOf(screenUrl({}), geometry);
-    const inset = ext.ctx.run("SIG_INSET_PX");
-    const w = 768 - 2 * inset;
-    const h = 480 - 2 * inset;
-    assert.equal(dims(sig), `240x${Math.round((240 * h) / w)}`);
+  test("screenshot pixels become page pixels through the page image's box", () => {
+    const [p] = plain(ctx.visionParas([{ kind: "paragraph", x0: 500, y0: 400, x1: 1500, y1: 600, lines: 3, text: " 譯文 " }], image, geometry, page));
+    assert.deepEqual(p, { kind: "paragraph", text: "譯文", boxes: [{ x0: 25, y0: 25, x1: 275, y1: 75, lines: 3 }], fg: "#acacac" });
   });
 
-  test("uses CONTENT_CROP before the page has ever said where the book is", async () => {
-    const ext = startExtension({ panel: false });
-    const C = plain(ext.ctx.run("CONTENT_CROP"));
-    const sig = await ext.ctx.pageSigOf(screenUrl({}), null);
-    assert.equal(dims(sig), `240x${Math.round((240 * 600 * (C.y1 - C.y0)) / (960 * (C.x1 - C.x0)))}`);
+  test("clamped to the page, corners in any order, lines at least 1", () => {
+    const [p] = plain(ctx.visionParas([{ kind: "heading", x0: 2000, y0: 1400, x1: 0, y1: 0, lines: 0.2, text: "x" }], image, geometry, page));
+    assert.deepEqual(p.boxes, [{ x0: 0, y0: 0, x1: 300, y1: 200, lines: 1 }]);
+    assert.equal(p.kind, "heading");
   });
 
-  test("reuses the last measured area for the same screenshot size", async () => {
-    const ext = startExtension({ panel: false });
-    const measured = await ext.ctx.pageSigOf(screenUrl({}), geometry);
-    const unmeasured = await ext.ctx.pageSigOf(screenUrl({}), null);
-    assert.equal(unmeasured, measured);
-    // Another window size: nothing measured for it yet.
-    const other = await ext.ctx.pageSigOf(screenUrl({ w: 800, h: 600 }), null);
-    assert.notEqual(dims(other), dims(measured));
-  });
-
-  test("leaves out a title bar the fixed area takes in", async () => {
-    const ext = startExtension({ panel: false });
-    const g = { viewport: { width: 960, height: 600 }, dpr: 1, page: { left: 96, top: 62, right: 864, bottom: 540 } };
-    const shown = await ext.ctx.pageSigOf(screenUrl({ toolbar: 0.1 }), g);
-    const hidden = await ext.ctx.pageSigOf(screenUrl({ toolbar: false }), g);
-    assert.equal(ext.ctx.pageDiff(shown, hidden), 0);
-    const fresh = startExtension({ panel: false });
-    const a = await fresh.ctx.pageSigOf(screenUrl({ toolbar: 0.1 }), null);
-    const b = await fresh.ctx.pageSigOf(screenUrl({ toolbar: false }), null);
-    assert.ok(fresh.ctx.pageDiff(a, b) > 0, "the old fixed area sees the title bar");
+  test("tiny, blank and textless blocks are dropped; other kinds are paragraphs", () => {
+    const out = plain(
+      ctx.visionParas(
+        [
+          { kind: "caption", x0: 500, y0: 400, x1: 505, y1: 600, text: "narrow" },
+          { kind: "caption", x0: 500, y0: 400, x1: 900, y1: 404, text: "flat" },
+          { kind: "caption", x0: 500, y0: 400, x1: 900, y1: 600, text: "  " },
+          { kind: "caption", x0: 500, y0: 400, x1: 900, y1: 600 },
+          { kind: "footnote", x0: 500, y0: 400, x1: 900, y1: 600, lines: "x", text: "ok" },
+          { kind: "quote", x0: "a", y0: 400, x1: 900, y1: 600, text: "nan corner" },
+        ],
+        image,
+        geometry,
+        page
+      )
+    );
+    assert.deepEqual(
+      out.map((p) => [p.kind, p.text, p.boxes[0].lines]),
+      [["paragraph", "ok", 1]],
+      "a box with a corner that isn't a number has no size"
+    );
   });
 });

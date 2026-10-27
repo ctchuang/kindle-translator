@@ -1,11 +1,15 @@
-// Service worker: captures the visible Kindle page, finds and translates each
-// text block, then pushes the blocks to the page (overlay) and the side panel.
-// Two engines:
-// - "ocr": Tesseract reads the text and its positions locally, then Haiku
-//   translates the text alone, optionally with Sonnet reviewing the draft. Fast, and the model never sees a book page.
-// - "vision": Opus reads the screenshot and translates it in one call.
+// Service worker: translates the screen Kindle Cloud Reader shows. The page
+// script (content.js) says which screen that is ("pageShown", from the
+// reader's own page data) and hands over its paragraphs and a clean drawing
+// of it. Two engines:
+// - "ocr": Tesseract reads each paragraph locally, then Haiku translates the
+//   text alone, optionally with Sonnet reviewing the draft. Fast, and the
+//   model never sees a book page. Translations are cached per paragraph, by
+//   its position range in the book, so they're reused whatever the layout.
+// - "vision": Opus reads a screenshot and translates it in one call.
+// See docs/design.md and docs/page-pipeline-v2.md.
 
-importScripts("ocr-layout.js", "page-sig.js");
+importScripts("ocr-layout.js");
 
 // Vision engine: only Opus. In testing, Sonnet 5.5 and Haiku 5.5 declined to
 // translate screenshots of Kindle book pages (citing copyright).
@@ -42,6 +46,7 @@ const DEFAULTS = {
   quality: "review",
   effort: "low",
   autoTranslate: true,
+  prefetch: true,
   targetLang: "繁體中文（台灣用語）",
   overlay: true,
 };
@@ -55,40 +60,15 @@ const MAX_PIXELS = 3_700_000;
 
 const API_TIMEOUT_MS = 180_000;
 
-// Part of the viewport OCR reads when the page can't say where the book is
-// drawn (see ocrCrop). A share of the screen can't fit every window: the title
-// bar is a fixed 62 CSS pixels, so 6% cuts through the first line in a tall
-// window and takes in the title bar in a short one. Larger crops are scaled
-// down: Tesseract's time grows with pixels, and body text stays well above
-// the size it needs.
-const OCR_CROP = { x0: 0.09, y0: 0.06, x1: 0.93, y1: 0.94 };
-const OCR_MAX_PIXELS = 5_000_000;
+// A screen's translation is only requested once it has stayed on screen this
+// long, so pages flipped past quickly are never sent. Drawing a cached
+// translation doesn't wait.
+const SETTLE_MS = 1200;
 
-// The book page images the reader drew (`geometry` from the content script)
-// as fractions of the screenshot, shrunk by `inset` CSS pixels on each side;
-// null when the page couldn't tell. Unlike a fixed share of the screen, this
-// keeps out the title bar, page arrows, bookmark ribbon and progress slider
-// at any window size, zoom or screen.
-function pageCrop(geometry, inset = 0) {
-  const page = geometry?.page;
-  const { width: vw, height: vh } = geometry?.viewport || {};
-  if (!page || !(vw > 0) || !(vh > 0)) return null;
-  const frac = (v, total) => Math.min(1, Math.max(0, v / total));
-  const crop = {
-    x0: frac(page.left + inset, vw),
-    y0: frac(page.top + inset, vh),
-    x1: frac(page.right - inset, vw),
-    y1: frac(page.bottom - inset, vh),
-  };
-  // Too small to be the book: something else matched.
-  if (crop.x1 - crop.x0 < 0.2 || crop.y1 - crop.y0 < 0.2) return null;
-  return crop;
-}
-
-// The part of the screenshot OCR reads.
-function ocrCrop(geometry) {
-  return pageCrop(geometry) ?? OCR_CROP;
-}
+// The next screen is translated ahead once the current one has been on
+// screen this long (and is translated), so flipping through translated pages
+// doesn't start and cancel a request on each.
+const PREFETCH_DWELL_MS = 2000;
 
 // Claude sometimes answers a page with a summary instead of a translation,
 // citing copyright, and the same page often translates fine on the next
@@ -98,82 +78,148 @@ const SUMMARY_RETRIES = 1;
 const READER_RE = /^https:\/\/read\.amazon\.(com|co\.jp|co\.uk|de|ca|com\.au)\//;
 
 let panelPorts = new Set();
-let pending = null; // { force, reason } of a request waiting for the current one
 
-// The foreground job translates what's on screen; only it draws the overlay
-// and posts results. When the page changes under it, it isn't cancelled but
-// moved to the background: it finishes, fills the cache, and turning back to
-// that page is then instant. Each job: { controller (cancels its OCR wait and
-// API calls), page: { sig, windowId, tabId } once captured, detached, done (resolves
-// to the blocks it cached, or null) }.
+// Jobs. The foreground job translates the screen on show; only it draws. When
+// the reader moves on, it isn't cancelled but moved to the background: it
+// finishes, fills the cache, and its paragraphs are then free wherever they
+// show up again. A prefetch job translates the next screen ahead. Each job:
+// { kind: "page" | "prefetch", page (screen), force, controller (cancels its
+// OCR wait and API calls), detached, done }.
 let current = null;
 const background = new Set();
-// Pages turned past while they were translating keep going, up to this many;
-// beyond it the oldest is cancelled, so paging on doesn't pile up requests.
+let prefetching = null;
+// Translations being requested, by paragraph cache key, so a job that needs
+// a paragraph another job is already paying for waits for it instead.
+const inflight = new Map();
+// Screens being read (OCR), by record key, for the same reason.
+const reading = new Map();
+// Screens turned past while translating keep going, up to this many; beyond
+// it the oldest is cancelled, so paging on doesn't pile up requests.
 const MAX_BACKGROUND = 1;
 
+let settleTimer = null;
+let prefetchTimer = null;
+
+// ---- Screens ----
+
+// A screen as content.js names it: { key (layout), start, end (position
+// range), asin, revision, width, height (CSS px), fill, ink }, plus the tab
+// it's in ({ tabId, windowId }) once the worker knows it.
+function screenId(page) {
+  return page ? `${page.key}|${page.start}` : null;
+}
+
+function sameScreen(a, b) {
+  return !!a && !!b && screenId(a) === screenId(b);
+}
+
+function describeScreen(page) {
+  return `位置 ${page.start}–${page.end}`;
+}
+
 // Chrome stops this service worker after ~30 s idle, wiping module state, so
-// the page cache and last screen fingerprint live in session storage
-// (cleared when the browser closes). Pages are found by fingerprint
-// (samePage), so the cache keeps an index of [id, fingerprint] and the
-// blocks under page:<id>.
+// what's on screen, what's drawn and the cache live in session storage
+// (cleared when the browser closes).
+async function getShown() {
+  return (await chrome.storage.session.get("shown")).shown ?? null;
+}
+
+async function setShown(page) {
+  if (page) await chrome.storage.session.set({ shown: page });
+  else await chrome.storage.session.remove("shown");
+}
+
+// The screen whose translation is on the page (or, with the overlay off, in
+// the side panel). While it's the one on screen, the side panel's button
+// retranslates (skipping the cache) and is labelled that way.
+async function getDrawn() {
+  return (await chrome.storage.session.get("drawn")).drawn ?? null;
+}
+
+async function setDrawn(page) {
+  if (page) await chrome.storage.session.set({ drawn: screenId(page) });
+  else await chrome.storage.session.remove("drawn");
+  broadcast({ type: "pageState", retranslate: !!page });
+}
+
+// ---- Cache ----
+
+// Per paragraph: { source, text, savedAt } under its position range in the
+// book, the same in any layout. Per screen: how the screen splits into
+// paragraphs, with their boxes and OCR text (its "record"), under the layout
+// key and its start. The vision engine's whole-screen results under vision:.
+const CACHE_PARAS = 5000;
 const CACHE_PAGES = 500;
 let cacheChain = Promise.resolve(); // index updates one at a time
 
-async function cacheGet(sig) {
-  const { pageIndex = [] } = await chrome.storage.session.get("pageIndex");
-  const hit = pageIndex.find(([, s]) => samePage(s, sig));
-  if (!hit) {
-    if (pageIndex.length) log(`快取裡沒有這一頁（最接近的差異 ${diffText(Math.min(...pageIndex.map(([, s]) => pageDiff(s, sig))))}）`);
-    return undefined;
-  }
-  log(`快取裡有這一頁（差異 ${pct(hit[1], sig)}）`);
-  const blocks = (await chrome.storage.session.get(`page:${hit[0]}`))[`page:${hit[0]}`];
-  return blocks?.length ? blocks : undefined; // empty results were never meant to stick
+function paraKey(page, p) {
+  return `para:${page.asin}:${page.revision}:${p.start}-${p.end}`;
 }
 
-// Difference between two fingerprints for the log, e.g. "3%".
-function pct(a, b) {
-  return diffText(pageDiff(a, b));
+function recordKey(page) {
+  return `page:${page.key}:${page.start}`;
 }
 
-function diffText(d) {
-  return `${Math.round(d * 100)}%`;
+function visionKey(page) {
+  return `vision:${page.key}:${page.start}`;
 }
 
-function cacheSet(sig, blocks) {
+// Store `items` (key → value) and keep the newest CACHE_PARAS paragraphs and
+// CACHE_PAGES screens.
+function cacheWrite(items) {
   const run = cacheChain.then(async () => {
-    const { pageIndex = [] } = await chrome.storage.session.get("pageIndex");
-    let entry = pageIndex.find(([, s]) => samePage(s, sig));
-    if (!entry) {
-      entry = [crypto.randomUUID(), sig];
-      pageIndex.push(entry);
+    const { cacheIndex = { paras: [], pages: [] } } = await chrome.storage.session.get("cacheIndex");
+    for (const key of Object.keys(items)) {
+      const list = key.startsWith("para:") ? cacheIndex.paras : cacheIndex.pages;
+      const i = list.indexOf(key);
+      if (i >= 0) list.splice(i, 1);
+      list.push(key);
     }
-    const dropped = pageIndex.splice(0, Math.max(0, pageIndex.length - CACHE_PAGES));
-    if (dropped.length) await chrome.storage.session.remove(dropped.map(([id]) => `page:${id}`));
-    await chrome.storage.session.set({ pageIndex, [`page:${entry[0]}`]: blocks });
+    const dropped = [
+      ...cacheIndex.paras.splice(0, Math.max(0, cacheIndex.paras.length - CACHE_PARAS)),
+      ...cacheIndex.pages.splice(0, Math.max(0, cacheIndex.pages.length - CACHE_PAGES)),
+    ];
+    const kept = { ...items };
+    for (const key of dropped) delete kept[key]; // past the limit in this very write
+    if (dropped.length) await chrome.storage.session.remove(dropped);
+    await chrome.storage.session.set({ ...kept, cacheIndex });
   });
   cacheChain = run.catch(() => {});
   return run;
 }
 
-// Fingerprint of the page whose translation is currently shown. While the
-// screen still matches it, the side-panel button retranslates (skipping the
-// cache) and is labelled that way.
-async function getShownSig() {
-  return (await chrome.storage.session.get("shownSig")).shownSig;
+async function cacheRead(keys) {
+  return keys.length ? chrome.storage.session.get(keys) : {};
 }
 
-async function setShownSig(sig) {
-  if (sig) await chrome.storage.session.set({ shownSig: sig });
-  else await chrome.storage.session.remove("shownSig");
-  broadcast({ type: "pageState", retranslate: !!sig });
+// The cached translation of each of the record's paragraphs that has text,
+// as paragraph key → text; null when any is missing.
+async function cachedTexts(page, record) {
+  const want = record.paras.filter((p) => p.source.trim());
+  const keys = want.map((p) => paraKey(page, p));
+  const have = await cacheRead(keys);
+  const texts = new Map();
+  for (const k of keys) if (have[k]?.text) texts.set(k, have[k].text);
+  return texts.size === keys.length ? texts : null;
 }
 
-async function swapLastSig(sig) {
-  const { lastSig } = await chrome.storage.session.get("lastSig");
-  await chrome.storage.session.set({ lastSig: sig });
-  return lastSig;
+// Draw `page` from the cache if everything it needs is there. `post`: also
+// add it to the side panel's list (not when merely redrawing).
+async function drawFromCache(page, settings, { post = true } = {}) {
+  if (settings.engine === "vision") {
+    const record = (await chrome.storage.session.get(visionKey(page)))[visionKey(page)];
+    if (!record) return false;
+    log(`命中快取（看圖模式，${record.paras.length} 個區塊），不呼叫 API`);
+    await draw(page, record, (p) => p.text, { cached: true, post });
+    return true;
+  }
+  const record = (await chrome.storage.session.get(recordKey(page)))[recordKey(page)];
+  if (!record) return false;
+  const texts = await cachedTexts(page, record);
+  if (!texts) return false;
+  log(`命中快取（${texts.size} 段），不呼叫 API`);
+  await draw(page, record, (p) => texts.get(paraKey(page, p)), { cached: true, post });
+  return true;
 }
 
 chrome.runtime.onInstalled.addListener(() => {
@@ -182,12 +228,15 @@ chrome.runtime.onInstalled.addListener(() => {
 });
 
 // Installing or reloading the extension cuts off the content scripts in tabs
-// already open, so page turns there would go unnoticed until something
-// reinjects them. Give those tabs a live copy now.
+// already open. Give those tabs live copies now. They missed the page data
+// fetched so far, so the screen is known again from the reader's next batch,
+// or after reloading the tab.
 async function injectIntoOpenReaders() {
-  const { content_scripts: [cs] } = chrome.runtime.getManifest();
-  for (const tab of await chrome.tabs.query({ url: cs.matches })) {
-    chrome.scripting.executeScript({ target: { tabId: tab.id, allFrames: true }, files: cs.js }).catch(() => {});
+  const scripts = chrome.runtime.getManifest().content_scripts;
+  for (const tab of await chrome.tabs.query({ url: scripts[0].matches })) {
+    for (const cs of scripts) {
+      chrome.scripting.executeScript({ target: { tabId: tab.id }, files: cs.js, world: cs.world || "ISOLATED" }).catch(() => {});
+    }
   }
 }
 
@@ -196,15 +245,16 @@ chrome.runtime.onConnect.addListener((port) => {
   panelPorts.add(port);
   port.onDisconnect.addListener(() => panelPorts.delete(port));
   for (const msg of unsent.splice(0)) port.postMessage(msg);
-  if (lastLayoutState) port.postMessage(lastLayoutState);
   // Button label and "not translated yet" hint for a freshly opened panel.
-  getShownSig().then((sig) => port.postMessage({ type: "pageState", retranslate: !!sig })).catch(() => {});
+  Promise.all([getShown(), getDrawn()])
+    .then(([shown, drawn]) => port.postMessage({ type: "pageState", retranslate: !!shown && drawn === screenId(shown) }))
+    .catch(() => {});
   port.onMessage.addListener((msg) => {
     if (msg.type === "translateNow") {
       log("手動翻譯：按下「翻譯這一頁」");
       translateActivePage({ force: true });
     }
-    if (msg.type === "captureNow") saveScreenshot(port);
+    if (msg.type === "captureNow") savePageData(port);
   });
 });
 
@@ -212,119 +262,54 @@ chrome.runtime.onConnect.addListener((port) => {
 // reply, so an async one answered every message, devCapture's included, with
 // undefined before the right listener could.
 chrome.runtime.onMessage.addListener((msg, sender) => {
-  if (msg.type === "pageTurned") onPageTurned(msg, sender);
+  if (msg.type === "pageShown") onPageShown(msg, sender);
+  if (msg.type === "pageLog") onPageLog(msg, sender);
 });
 
-async function onPageTurned(msg, sender) {
-  const { autoTranslate } = await getSettings();
+// The reader shows another screen (or one couldn't be identified).
+async function onPageShown(msg, sender) {
+  const tab = sender.tab;
+  if (!tab?.active) return;
+  clearTimeout(settleTimer);
+  clearTimeout(prefetchTimer);
+  // The page cleared its overlay: it belonged to the screen that's gone.
+  await setDrawn(null);
+  if (msg.error) {
+    await setShown(null);
+    if (!(await panelOpen())) return;
+    logTabId = tab.id;
+    log(`無法辨識目前這一頁：${msg.error}`);
+    broadcast({ type: "warn", text: msg.error });
+    return;
+  }
+  const page = { ...msg.page, tabId: tab.id, windowId: tab.windowId };
+  await setShown(page);
   // Only translate when the panel is open, so we don't spend tokens silently.
-  if (!(await panelOpen()) || !sender.tab?.active) return;
-  logTabId = sender.tab.id;
-  if (!autoTranslate) return refreshButtonState(sender.tab);
-  // Key, click, wheel and window resize hide the overlay on the page at once;
-  // "dom" leaves it up until the check below.
-  const cleared = msg.reason !== "dom" ? "，書頁上的譯文已先清掉" : "";
-  log(`偵測到翻頁（${msg.reason}${cleared}）`);
-  translateActivePage({ force: false, reason: msg.reason });
+  if (!(await panelOpen())) return;
+  logTabId = tab.id;
+  const how = msg.tried ? `（比對 ${msg.tried} 個畫面，${msg.ms ?? "?"} 毫秒）` : "";
+  log(`畫面換到${describeScreen(page)}${how}`);
+  if (current && !sameScreen(current.page, page)) detach(current);
+  const settings = await getSettings();
+  if (await drawFromCache(page, settings)) return;
+  if (!settings.autoTranslate) return;
+  if (current) return; // already translating this very screen
+  settleTimer = setTimeout(async () => {
+    if (sameScreen(await getShown(), page)) translateActivePage({ force: false });
+  }, SETTLE_MS);
 }
 
-// Development aid: the screen exactly as translation captures it (same
-// call, format and quality, our overlay hidden), plus where the book is
-// drawn, as a test input. The overlay is redrawn afterwards, from the cache.
-// Resolves to { dataUrl, filename, info }; `name` replaces the timestamp in
-// the file name.
-async function testShot(tab, name) {
-  let hidden = false;
-  try {
-    hidden = !!(await sendToPage(tab.id, { type: "overlayState" }))?.shown;
-    if (hidden) await sendToPage(tab.id, { type: "clearOverlay" });
-  } catch (_) {} // no content script: there's no overlay to hide either
-  const geometry = await pageGeometry(tab.id);
-  let dataUrl;
-  try {
-    dataUrl = await capture(tab.windowId);
-  } finally {
-    if (hidden) translateActivePage({ force: false, reason: "overlay" });
-  }
-  const asin = new URL(tab.url).searchParams.get("asin") || "unknown";
-  const stamp = new Date().toISOString().replace(/[-:]/g, "").replace("T", "-").slice(0, 15);
-  const filename = `${name || `kindle-${asin}-${stamp}`}.jpg`;
-  log(`已截圖：${filename}（${Math.round((dataUrl.length * 3) / 4 / 1024)} KB）`, dataUrl);
-  return { dataUrl, filename, info: { asin, capturedAt: new Date().toISOString(), ...geometry } };
-}
-
-// 存下截圖 in the side panel: the panel saves the file.
-async function saveScreenshot(port) {
-  if (current) {
-    log("翻譯進行中，等完成再截圖");
-    return;
-  }
-  const [tab] = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
-  if (!tab || !READER_RE.test(tab.url || "")) {
-    broadcast({ type: "error", text: "目前分頁不是 Kindle Cloud Reader。" });
-    return;
-  }
-  let shot;
-  try {
-    shot = await testShot(tab);
-  } catch (err) {
-    broadcast({ type: "error", text: `截圖失敗：${err.message}` });
-    return;
-  }
-  try {
-    port.postMessage({ type: "screenshot", ...shot });
-  } catch (_) {} // the panel closed meanwhile
-}
-
-// The same shot asked for by a test tool driving the reader page (content.js
-// relays it), sent straight to a receiver on this computer
-// (tests/tools/receive-fixtures.js) instead of the downloads folder. Off
-// unless the options page's developer switch is on; the page only learns
-// whether it worked, never the image.
-const DEV_RECEIVER = "http://127.0.0.1:8765/fixture";
-
-chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
-  if (msg.type !== "devCapture") return;
-  devCapture(sender.tab, msg.name).then(sendResponse, (err) => sendResponse({ ok: false, error: String(err?.message || err) }));
-  return true; // replies asynchronously
-});
-
-async function devCapture(tab, name) {
-  const { devCapture: enabled } = await chrome.storage.local.get({ devCapture: false });
-  if (!enabled) return { ok: false, error: "開發者開關沒有開啟（設定頁）" };
-  if (!tab?.active || !READER_RE.test(tab.url || "")) return { ok: false, error: "只能截目前顯示的 Kindle 分頁" };
-  if (current) return { ok: false, error: "翻譯進行中，等完成再截圖" };
-  const safe = typeof name === "string" && /^[a-z0-9][a-z0-9-]{0,80}$/.test(name) ? name : undefined;
-  const shot = await testShot(tab, safe);
-  const res = await fetch(DEV_RECEIVER, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify(shot),
-  });
-  if (!res.ok) return { ok: false, error: `接收程式回應 HTTP ${res.status}` };
-  return { ok: true, filename: shot.filename, bytes: Math.round((shot.dataUrl.length * 3) / 4) };
+function onPageLog(msg, sender) {
+  if (!sender.tab?.active) return;
+  panelOpen().then((open) => open && log(msg.text));
 }
 
 // Whether a side panel is open. Not panelPorts: Chrome stops this worker
-// after 30 s idle, and the page-turn message that wakes it arrives before the
-// panel has reconnected, so a click after a pause was dropped and the page,
-// its overlay already hidden, stayed in English.
+// after 30 s idle, and the message that wakes it arrives before the panel
+// has reconnected, so a page turn after a pause would be dropped.
 async function panelOpen() {
   if (panelPorts.size) return true;
   return (await chrome.runtime.getContexts({ contextTypes: ["SIDE_PANEL"] })).length > 0;
-}
-
-// Without auto-translate nothing else re-checks the screen after a page turn,
-// so do it here to keep the button label honest.
-async function refreshButtonState(tab) {
-  if (current) return;
-  try {
-    const shown = await getShownSig();
-    if (!shown) return;
-    const now = await captureSig(tab);
-    const { overlaySig } = await chrome.storage.session.get("overlaySig");
-    if (!samePage(now, shown) && !samePage(now, overlaySig)) await setShownSig(null);
-  } catch (_) {}
 }
 
 chrome.commands.onCommand.addListener(async (cmd) => {
@@ -339,11 +324,17 @@ chrome.commands.onCommand.addListener(async (cmd) => {
 });
 
 // Translation / original switch (side panel or the button on the page). The
-// page hides and shows its overlay itself. When it comes back on, check that
-// it still matches the screen; a cached page is redrawn without an API call.
+// page hides and shows its overlay itself; a translation made while it was
+// off was never drawn, so draw it from the cache when it comes back on.
 chrome.storage.onChanged.addListener((changes, area) => {
-  if (area === "sync" && changes.overlay?.newValue) translateActivePage({ force: false, reason: "overlay" });
+  if (area === "sync" && changes.overlay?.newValue) redrawShown();
 });
+
+async function redrawShown() {
+  const shown = await getShown();
+  if (!shown || current) return;
+  await drawFromCache(shown, await getSettings(), { post: false });
+}
 
 // Step-by-step trace shown at the bottom of the side panel. `image` (a data
 // URL) is shown as a thumbnail under the line.
@@ -379,58 +370,72 @@ async function getSettings() {
   return { ...DEFAULTS, ...(await chrome.storage.sync.get(Object.keys(DEFAULTS))) };
 }
 
-// Part of the viewport the fingerprint looks at before the page has ever said
-// where the book is drawn (see sigCrop), as fractions. Meant to leave out the
-// title bar, the progress bar / "Learning reading speed…" footer, the page
-// arrows (which get a focus ring after a key press) and the bookmark ribbon,
-// but the title bar is a fixed 62 CSS pixels, so in a short window it reaches
-// in, and its sliding in and out looked like a page turn.
-const CONTENT_CROP = { x0: 0.09, y0: 0.08, x1: 0.91, y1: 0.91 };
-
-// The page image overlaps the title bar by a couple of pixels; keep that edge
-// out of the fingerprint.
-const SIG_INSET_PX = 4;
-
-// The fingerprint's area: the book page images, or, when the page can't say
-// this time, the area last measured for a screenshot of this size, so the same
-// page keeps the same fingerprint; CONTENT_CROP until anything is measured.
-// Kept in session storage, like the fingerprints themselves.
-async function sigCrop(geometry, bitmap) {
-  const key = `sigCrop:${bitmap.width}x${bitmap.height}`;
-  const stored = (await chrome.storage.session.get(key))[key];
-  const crop = pageCrop(geometry, SIG_INSET_PX);
-  if (!crop) return stored ?? CONTENT_CROP;
-  if (JSON.stringify(crop) !== JSON.stringify(stored)) await chrome.storage.session.set({ [key]: crop });
-  return crop;
+// The active tab if it's a Kindle reader, else null.
+async function readerTab() {
+  const [tab] = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
+  return tab && READER_RE.test(tab.url || "") ? tab : null;
 }
 
-// Identifies the page by its text area only, so reader-UI changes don't make
-// the same page look new (cache miss, paid retranslation) and a real page
-// change is noticed however it happened (arrow, Enter, slider, table of
-// contents). A coarse fingerprint compared with samePage (page-sig.js), not
-// an exact hash: toolbar animation, hover effects and JPEG noise change a few
-// pixels of the same page.
-async function pageSigOf(dataUrl, geometry) {
-  const bitmap = await createImageBitmap(await (await fetch(dataUrl)).blob());
-  const crop = await sigCrop(geometry, bitmap);
-  const sx = bitmap.width * crop.x0;
-  const sy = bitmap.height * crop.y0;
-  const sw = bitmap.width * (crop.x1 - crop.x0);
-  const sh = bitmap.height * (crop.y1 - crop.y0);
-  const w = SIG_WIDTH;
-  const h = Math.round((w * sh) / sw);
-  const ctx = new OffscreenCanvas(w, h).getContext("2d");
-  ctx.imageSmoothingQuality = "high"; // average the area, like the Node tests
-  ctx.drawImage(bitmap, sx, sy, sw, sh, 0, 0, w, h);
-  const rgba = ctx.getImageData(0, 0, w, h).data;
-  const data = new Uint8Array(w * h);
-  for (let i = 0; i < data.length; i++) data[i] = (rgba[i * 4] * 299 + rgba[i * 4 + 1] * 587 + rgba[i * 4 + 2] * 114) / 1000;
-  return pageSignature({ width: w, height: h, data });
+// Development aid: the shown screen's page data, as content.js keeps it
+// (with the glyphs it uses), to debug or build tests with on this computer.
+// 存下頁面資料 in the side panel: the panel saves the file.
+async function savePageData(port) {
+  const tab = await readerTab();
+  if (!tab) {
+    broadcast({ type: "error", text: "目前分頁不是 Kindle Cloud Reader。" });
+    return;
+  }
+  let dump;
+  try {
+    dump = await sendToPage(tab.id, { type: "dumpPage" });
+  } catch (err) {
+    dump = { error: err.message };
+  }
+  if (!dump || dump.error) {
+    broadcast({ type: "error", text: `存不了頁面資料：${dump?.error || "頁面沒有回應"}` });
+    return;
+  }
+  const json = JSON.stringify(dump.data);
+  log(`已存下頁面資料：${dump.filename}（${Math.round(json.length / 1024)} KB）`);
+  try {
+    port.postMessage({ type: "savePage", filename: dump.filename, json });
+  } catch (_) {} // the panel closed meanwhile
 }
+
+// The same, asked for by a test tool driving the reader page (content.js
+// relays it), sent straight to a receiver on this computer
+// (tests/tools/receive-pages.js) instead of the downloads folder. Off unless
+// the options page's developer switch is on; the page only learns whether it
+// worked, never the data.
+const DEV_RECEIVER = "http://127.0.0.1:8765/page";
+
+chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
+  if (msg.type !== "devCapture") return;
+  devCapture(sender.tab, msg.name).then(sendResponse, (err) => sendResponse({ ok: false, error: String(err?.message || err) }));
+  return true; // replies asynchronously
+});
+
+async function devCapture(tab, name) {
+  const { devCapture: enabled } = await chrome.storage.local.get({ devCapture: false });
+  if (!enabled) return { ok: false, error: "開發者開關沒有開啟（設定頁）" };
+  if (!tab?.active || !READER_RE.test(tab.url || "")) return { ok: false, error: "只能存目前顯示的 Kindle 分頁" };
+  const dump = await sendToPage(tab.id, { type: "dumpPage" });
+  if (!dump || dump.error) return { ok: false, error: dump?.error || "頁面沒有回應" };
+  const safe = typeof name === "string" && /^[a-z0-9][a-z0-9-]{0,80}$/.test(name) ? name : undefined;
+  const filename = safe ? `${safe}.json` : dump.filename;
+  const res = await fetch(DEV_RECEIVER, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ filename, data: dump.data }),
+  });
+  if (!res.ok) return { ok: false, error: `接收程式回應 HTTP ${res.status}` };
+  return { ok: true, filename };
+}
+
+// ---- Screenshots (vision engine only) ----
 
 // Chrome allows only 2 captureVisibleTab calls per second
-// (MAX_CAPTURE_VISIBLE_TAB_CALLS_PER_SECOND) and throws past that. Several
-// frames can report a page turn at once, each triggering a check, so every
+// (MAX_CAPTURE_VISIBLE_TAB_CALLS_PER_SECOND) and throws past that, so every
 // capture goes through this queue and is spaced out.
 const CAPTURE_GAP_MS = 600;
 let captureChain = Promise.resolve();
@@ -450,250 +455,406 @@ function capture(windowId) {
   return run;
 }
 
-// Fingerprint of what `tab` ({ id, windowId }) shows now.
-async function captureSig(tab) {
-  const geometry = await pageGeometry(tab.id);
-  return pageSigOf(await capture(tab.windowId), geometry);
-}
+// ---- Jobs ----
 
-// While a request runs, any page-turn signal (even plain DOM churn, or an
-// Enter on the arrow button that no key handler recognises) re-captures the
-// screen: if the text area changed, the running request is for a page that's
-// gone, so cancel it.
-let checking = false;
-let recheck = false;
-
-async function detachIfPageChanged() {
-  // Collapse a burst of signals into one running check plus one follow-up,
-  // so they don't pile up captures ahead of the next real translation.
-  if (checking) {
-    recheck = true;
-    return;
-  }
-  checking = true;
-  try {
-    do {
-      recheck = false;
-      await checkPageOnce();
-    } while (recheck);
-  } finally {
-    checking = false;
-  }
-}
-
-async function checkPageOnce() {
-  const job = current;
-  const page = job?.page;
-  if (!page) return;
-  let now;
-  try {
-    now = await captureSig({ id: page.tabId, windowId: page.windowId });
-  } catch (_) {
-    return; // tab not capturable right now (e.g. another tab is in front)
-  }
-  if (current !== job) return;
-  if (samePage(now, page.sig)) log(`檢查：還是同一頁（差異 ${pct(now, page.sig)}），繼續`);
-  else detach(job, now, pct(now, page.sig));
-}
-
-// Let the foreground job finish in the background and start on the new page,
-// whose content sig is `now`.
-function detach(job, now, diff) {
-  job.detached = true;
-  if (job.waiting) {
-    // It was only waiting on a background job, which keeps going anyway.
-    log("畫面已換頁：不再等背景翻譯，先翻目前畫面");
-    release(job);
-    return;
-  }
-  background.add(job);
-  log(`畫面已換頁（差異 ${diff}）：先前那一頁改在背景翻完並存快取，先翻目前畫面`);
-  if (background.size > MAX_BACKGROUND) {
-    // Not the one for the page now on screen: turning back to it waits for it.
-    const oldest = [...background].find((j) => !samePage(j.page.sig, now));
-    background.delete(oldest);
-    oldest.controller.abort();
-    log(oldest === job ? "背景翻譯已達上限，取消剛翻走的那一頁" : "背景翻譯已達上限，取消最早的一個");
-  }
-  release(job);
-}
-
-// The foreground is free: run the queued request, if any.
-function release(job) {
-  if (current !== job) return;
-  current = null;
-  if (pending) {
-    const next = pending;
-    pending = null;
-    log("處理排隊中的請求");
-    translateActivePage(next);
-  } else {
-    // Lets the side panel stop its "translating… N s" timer even when this
-    // run ended without a result (cancelled, skipped).
-    broadcast({ type: "idle" });
-  }
-}
-
-// Turning back to a page whose translation is still running in the
-// background: wait for it rather than paying for the page twice.
-async function backgroundResult(job, sig, tab) {
-  const running = [...background].find((j) => j.page && samePage(j.page.sig, sig));
-  if (!running) return undefined;
-  log("這一頁還在背景翻譯，等它完成");
-  broadcast({ type: "working" });
-  job.page = { sig, windowId: tab.windowId, tabId: tab.id }; // so turning away again releases the wait
-  job.waiting = true;
-  try {
-    return (await running.done) ?? undefined;
-  } finally {
-    job.waiting = false;
-  }
-}
-
-// `reason` is the page-turn signal: "dom" is the reader re-rendering on its
-// own (reading-progress updates every 15 s or so), not a user action.
-async function translateActivePage({ force, reason }) {
-  if (current) {
-    // Run once more after the current request finishes, keeping "force" if
-    // any queued trigger asked for it, and "dom" only if every trigger was
-    // reader churn (so the queued run can skip without hiding the overlay).
-    pending = {
-      force: force || !!pending?.force,
-      reason: !pending || pending.reason === "dom" ? reason : pending.reason,
-    };
-    if (reason === "overlay") return; // nothing to cancel: the screen didn't change
-    if (force) {
-      // A manual retranslate wins: cancel the running API call instead of
-      // waiting for it. Tokens it already used are still billed.
-      log("手動翻譯：取消進行中的請求，改翻目前畫面");
-      current.controller.abort();
-    } else {
-      log("前一個請求還沒結束，排隊；同時檢查畫面是否已換頁");
-      detachIfPageChanged();
-    }
-    return;
-  }
-  const job = { controller: new AbortController(), page: null, detached: false };
-  job.done = new Promise((resolve) => (job.finish = resolve));
-  current = job;
-  // Calling an extension API resets the service worker's 30 s idle timer;
-  // reading a response stream alone doesn't.
-  const keepAlive = setInterval(() => chrome.runtime.getPlatformInfo(), 20_000);
-  try {
-    await runJob(job, { force, reason });
-  } catch (err) {
-    if (err.name === "AbortError") {
-      // Forget this screen so the queued run doesn't skip it as "unchanged".
-      if (!job.detached) await chrome.storage.session.remove("lastSig");
-      log(job.detached ? "已取消一個背景翻譯" : "已取消前一個請求");
-    } else if (job.detached) {
-      log(`背景翻譯失敗：${err.message || err}`);
-    } else {
-      broadcast({ type: "error", text: String(err.message || err) });
-      log(`失敗：${err.message || err}`);
-    }
-  } finally {
-    clearInterval(keepAlive);
-    job.finish(null); // no-op if it already resolved with blocks
-    background.delete(job);
-    release(job);
-  }
-}
-
-async function runJob(job, { force, reason }) {
-  const [tab] = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
-  if (tab && READER_RE.test(tab.url || "")) logTabId = tab.id;
-  if (!tab || !READER_RE.test(tab.url || "")) {
+// Translate the screen on show. `force` (the button, Alt+T): on a screen
+// whose translation is already drawn, ask Claude again instead of using the
+// cache; and cancel a request already running for it.
+async function translateActivePage({ force = false } = {}) {
+  const tab = await readerTab();
+  if (!tab) {
     broadcast({ type: "error", text: "目前分頁不是 Kindle Cloud Reader。" });
     return;
   }
+  logTabId = tab.id;
   const settings = await getSettings();
   if (!settings.apiKey) {
     broadcast({ type: "error", text: "請先到設定頁填入 Anthropic API key。", needsKey: true });
     return;
   }
+  let res;
+  try {
+    res = await sendToPage(tab.id, { type: "currentPage" });
+  } catch (err) {
+    res = { error: err.message };
+  }
+  if (!res?.page) {
+    const why = res?.error || "頁面沒有回應";
+    log(`無法辨識目前這一頁：${why}`);
+    broadcast({ type: "error", text: `無法辨識目前這一頁：${why}` });
+    return;
+  }
+  const page = { ...res.page, tabId: tab.id, windowId: tab.windowId };
+  await setShown(page);
+  const retranslate = force && (await getDrawn()) === screenId(page);
+  if (retranslate) log(`重新翻譯本頁（${describeScreen(page)}），不使用快取`);
+  else if (await drawFromCache(page, settings)) return;
+  if (current) {
+    if (sameScreen(current.page, page)) {
+      if (!force) return; // already on it
+      // A manual retranslate wins: cancel the running API call instead of
+      // waiting for it. Tokens it already used are still billed.
+      log("手動翻譯：取消進行中的請求，改翻目前畫面");
+      current.controller.abort();
+      current = null;
+    } else {
+      detach(current);
+    }
+  }
+  const job = startJob("page", page, { force: retranslate, settings });
+  await job.done;
+}
 
-  // The reader re-renders now and then without the page changing. Hiding
-  // the overlay to check made the original text flash, so compare the
-  // screen as it is, overlay included, with how it looked when drawn. Ask
-  // the page too: a sig taken while the overlay happened to be hidden would
-  // otherwise match the bare page and keep the translation off for good.
-  if (!force && (reason === "dom" || reason === "overlay") && settings.overlay) {
-    const { overlaySig } = await chrome.storage.session.get("overlaySig");
+function startJob(kind, page, { force = false, settings }) {
+  const job = { kind, page, force, controller: new AbortController(), detached: false };
+  job.done = new Promise((resolve) => (job.finish = resolve));
+  if (kind === "page") current = job;
+  else prefetching = job;
+  // Calling an extension API resets the service worker's 30 s idle timer;
+  // reading a response stream alone doesn't.
+  const keepAlive = setInterval(() => chrome.runtime.getPlatformInfo(), 20_000);
+  (async () => {
     try {
-      const shown = (await sendToPage(tab.id, { type: "overlayState" }))?.shown;
-      const now = overlaySig && shown ? await captureSig(tab) : null;
-      if (now && samePage(now, overlaySig)) {
-        log(`畫面沒變（譯文還在，差異 ${pct(now, overlaySig)}），略過`);
-        return;
+      await runJob(job, settings);
+    } catch (err) {
+      const what = job.kind === "prefetch" ? "預讀" : job.detached ? "背景翻譯" : null;
+      if (err.name === "AbortError") log(what ? `已取消${what}（${describeScreen(job.page)}）` : "已取消前一個請求");
+      else if (what) log(`${what}失敗：${err.message || err}`);
+      else {
+        broadcast({ type: "error", text: String(err.message || err) });
+        log(`失敗：${err.message || err}`);
       }
-      log(
-        !overlaySig
-          ? "重新檢查：沒有譯文畫面的紀錄"
-          : !shown
-            ? "重新檢查：頁面上沒有顯示譯文"
-            : `重新檢查：畫面跟畫上譯文時不同（差異 ${Math.round(pageDiff(overlaySig, now) * 100)}%）`
+    } finally {
+      clearInterval(keepAlive);
+      background.delete(job);
+      if (prefetching === job) prefetching = null;
+      if (current === job) {
+        current = null;
+        // Lets the side panel stop its "translating… N s" timer even when this
+        // run ended without a result (cancelled, failed).
+        if (!job.drew) broadcast({ type: "idle" });
+      }
+      job.finish();
+    }
+  })();
+  return job;
+}
+
+// The reader moved on while `job` translated: let it finish in the
+// background, caching what it gets, and free the foreground.
+function detach(job) {
+  if (current === job) current = null;
+  job.detached = true;
+  background.add(job);
+  log(`畫面已換頁：先前那一頁（${describeScreen(job.page)}）改在背景翻完並存快取`);
+  broadcast({ type: "idle" });
+  if (background.size > MAX_BACKGROUND) {
+    const oldest = [...background][0];
+    background.delete(oldest);
+    oldest.controller.abort();
+    log(oldest === job ? "背景翻譯已達上限，取消剛翻走的那一頁" : "背景翻譯已達上限，取消最早的一個");
+  }
+}
+
+async function runJob(job, settings) {
+  if (settings.engine === "vision") return runVision(job, settings);
+  const started = Date.now();
+  if (job.kind === "page") broadcast({ type: "working" });
+  const record = await screenRecord(job);
+  if (!record.paras.some((p) => p.source.trim())) {
+    log(`這一頁沒有文字（${describeScreen(job.page)}），不用翻譯`);
+    if (job.kind === "page" && !job.detached) schedulePrefetch(job.page);
+    return;
+  }
+  const out = await translateRecord(job, record, settings);
+  const what = job.kind === "prefetch" ? "預讀完成" : job.detached ? "背景翻完先前那一頁" : "翻譯完成";
+  log(`${what}：${describeScreen(job.page)}，${out.sent} 段送出、${out.reused} 段沿用快取或其他請求，從開始共 ${seconds(started)} 秒${out.summary ? "（只拿到摘要，不存快取）" : ""}`);
+  if (out.notes) log(`Claude 的說明：${out.notes}`);
+  if (job.kind !== "page" || job.detached) return;
+  // Drawn only if the reader still shows it; the page checks that again.
+  if (!sameScreen(await getShown(), job.page)) {
+    log("翻譯期間畫面已換頁，這份譯文不畫上去（已存快取）");
+    return;
+  }
+  job.drew = true;
+  await draw(job.page, record, (p) => out.texts.get(paraKey(job.page, p)), { fallbackModel: out.fallbackModel, summary: out.summary });
+  // After the result, which clears the status line.
+  if (out.summary) broadcast({ type: "warn", text: "Claude 只給了摘要，不是完整翻譯。可以按「重新翻譯本頁」再試。" });
+}
+
+// How `job.page` splits into paragraphs, with each one's OCR text: from the
+// cache, from another job reading it right now, or read here.
+async function screenRecord(job) {
+  const key = recordKey(job.page);
+  const cached = (await chrome.storage.session.get(key))[key];
+  if (cached) return cached;
+  if (reading.has(key)) {
+    log("這一頁正由其他請求辨識，等它完成");
+    const r = await reading.get(key);
+    if (r) return r;
+  }
+  let done;
+  reading.set(key, new Promise((r) => (done = r)));
+  try {
+    const record = await readScreen(job);
+    await cacheWrite({ [key]: record });
+    done(record);
+    return record;
+  } catch (err) {
+    done(null);
+    throw err;
+  } finally {
+    reading.delete(key);
+  }
+}
+
+// Ask the page for the screen's paragraphs and a drawing of it, and OCR it.
+async function readScreen(job) {
+  const { page } = job;
+  const data = await sendToPage(page.tabId, { type: "pageData", key: page.key, start: page.start, image: true });
+  if (!data || data.error) throw new Error(`拿不到這一頁的頁面資料：${data?.error || "頁面沒有回應"}`);
+  job.controller.signal.throwIfAborted();
+  const record = { size: { width: data.page.width, height: data.page.height }, bg: data.page.fill, paras: [] };
+  if (!data.paragraphs.length) return record;
+  const started = Date.now();
+  const { scale } = data;
+  log(`OCR 辨識中（${data.paragraphs.length} 段，${data.columns.length} 欄）…`);
+  await ensureOffscreen();
+  const res = await chrome.runtime.sendMessage({
+    target: "offscreen",
+    type: "ocr",
+    image: data.image,
+    rects: data.columns.map(([x0, x1]) => ({
+      left: Math.round(x0 * scale),
+      top: 0,
+      width: Math.round((x1 - x0) * scale),
+      height: Math.round(data.page.height * scale),
+    })),
+  });
+  if (!res || res.error) throw new Error(`OCR 失敗：${res?.error || "offscreen 文件沒有回應"}`);
+  job.controller.signal.throwIfAborted();
+  const lines = res.columns.flat().map((l) => ({ ...l, x0: l.x0 / scale, y0: l.y0 / scale, x1: l.x1 / scale, y1: l.y1 / scale }));
+  const texts = assignLines(lines, data.paragraphs);
+  record.paras = data.paragraphs.map((p, i) => ({ start: p.start, end: p.end, kind: p.kind, column: p.column, boxes: p.boxes, fg: p.fg, source: texts[i] }));
+  const empty = texts.filter((t) => !t.trim()).length;
+  log(`OCR 完成：${seconds(started)} 秒，${lines.length} 行${empty ? `，${empty} 段沒有讀到字` : ""}`);
+  const read = texts.filter(Boolean);
+  if (read.length) log(`OCR 文字：${read.join(" ¶ ").slice(0, 400)}`);
+  return record;
+}
+
+// Translations for the record's paragraphs: cached ones (unless forced),
+// ones another job is requesting (waited for), and the rest requested here.
+// Resolves to { texts (paragraph key → text), sent, reused, notes,
+// fallbackModel, summary }.
+async function translateRecord(job, record, settings) {
+  const { page } = job;
+  const want = record.paras.filter((p) => p.source.trim());
+  const keyOf = (p) => paraKey(page, p);
+  const texts = new Map();
+  if (!job.force) {
+    const have = await cacheRead(want.map(keyOf));
+    for (const p of want) if (have[keyOf(p)]?.text) texts.set(keyOf(p), have[keyOf(p)].text);
+  }
+  let pending = want.filter((p) => !texts.has(keyOf(p)));
+  const out = { texts, sent: 0, reused: texts.size, notes: "", fallbackModel: null, summary: false };
+  if (texts.size) log(`${texts.size} 段已在快取，${pending.length} 段要翻譯`);
+  for (let round = 0; pending.length; round++) {
+    // Someone else paying for a paragraph: wait for theirs (first round only).
+    const waits = round === 0 && !job.force ? pending.filter((p) => inflight.has(keyOf(p))) : [];
+    const waited = waits.map((p) => inflight.get(keyOf(p)));
+    const send = pending.filter((p) => !waits.includes(p));
+    if (waits.length) log(`${waits.length} 段正由其他請求翻譯，等它們完成`);
+    const own = new Map(send.map((p) => [keyOf(p), deferred()]));
+    for (const [k, d] of own) inflight.set(k, d.promise);
+    let got = null;
+    try {
+      if (send.length) {
+        got = await requestTranslations(settings, send, job.controller.signal);
+        out.sent += send.length;
+        out.notes = [out.notes, got.notes].filter(Boolean).join(" ");
+        out.fallbackModel ??= got.fallbackModel;
+        out.summary ||= got.summary;
+        const items = {};
+        send.forEach((p, i) => {
+          const text = got.texts[i];
+          if (!text) return;
+          texts.set(keyOf(p), text);
+          items[keyOf(p)] = { source: p.source, text, savedAt: Date.now() };
+        });
+        // A summary isn't cached, so the screen is asked for again next time.
+        if (!got.summary && Object.keys(items).length) await cacheWrite(items);
+      }
+    } finally {
+      for (const [k, d] of own) {
+        d.resolve(texts.get(k) ?? null);
+        if (inflight.get(k) === d.promise) inflight.delete(k);
+      }
+    }
+    const results = await Promise.all(waited);
+    waits.forEach((p, i) => results[i] && texts.set(keyOf(p), results[i]));
+    out.reused += results.filter(Boolean).length;
+    // Only what the other job failed to get goes round again.
+    pending = waits.filter((p, i) => !results[i]);
+    if (round >= 1) break;
+  }
+  return out;
+}
+
+// Translate paragraphs ({ source, column }) with the configured quality
+// level, retrying a summary. Resolves to { texts (by index), notes,
+// fallbackModel, summary }.
+async function requestTranslations(settings, paras, jobSignal) {
+  const plan = qualityOf(settings);
+  const items = paras.map((p, id) => ({ id, text: p.source }));
+  const chunks = splitParas(items, paras);
+  let out;
+  for (let attempt = 0; ; attempt++) {
+    // Output speed is the bottleneck, so translate the chunks side by side.
+    const failed = new AbortController(); // one chunk failing stops the others
+    const signal = AbortSignal.any([jobSignal, failed.signal]);
+    let outs;
+    try {
+      outs = await Promise.all(
+        chunks.map(async (chunk, i) => {
+          const tag = chunks.length > 1 ? `[${i + 1}/${chunks.length}] ` : "";
+          const draft = await translateChunk(settings, chunk, tag, signal);
+          // An Opus fallback's translation doesn't need a Sonnet review.
+          return plan.review && !draft.byOpus ? reviewChunk(settings, plan.review, chunk, draft, tag, signal) : draft;
+        })
       );
     } catch (err) {
-      log(`重新檢查失敗：${err.message}`);
+      failed.abort(); // don't leave the other calls running
+      throw err;
     }
+    const byId = new Map(outs.flatMap((o) => o.translations || []).map((t) => [t.id, (t.text || "").trim()]));
+    out = {
+      texts: items.map((p) => byId.get(p.id) || ""),
+      notes: outs.map((o) => (o.notes || "").trim()).filter(Boolean).join(" "),
+      summarized: outs.some((o) => o.summarized === true),
+      model: outs.find((o) => o.model !== plan.translate)?.model ?? outs[0].model, // shows when Opus stepped in
+    };
+    if (!isSummary(out)) break;
+    if (attempt >= SUMMARY_RETRIES) {
+      log(`重試後仍然只給摘要，先顯示摘要（不存快取）：${out.notes || "沒有說明"}`);
+      break;
+    }
+    log(`Claude 這次只給摘要，不是翻譯（${out.notes || "沒有說明"}），自動重新請求`);
   }
+  return { texts: out.texts, notes: out.notes, fallbackModel: out.model !== plan.translate ? out.model : null, summary: isSummary(out) };
+}
 
+function deferred() {
+  let resolve;
+  const promise = new Promise((r) => (resolve = r));
+  return { promise, resolve };
+}
+
+// Draw a screen's translation on the page and post it to the side panel.
+// `textOf(para)` gives each record paragraph's translation (or nothing).
+async function draw(page, record, textOf, { cached = false, post = true, fallbackModel = null, summary = false } = {}) {
+  const settings = await getSettings();
+  const blocks = record.paras
+    .map((p) => ({ kind: p.kind, text: textOf(p) || "", boxes: p.boxes, fg: p.fg }))
+    .filter((b) => b.text.trim());
+  if (post) broadcast({ type: "result", text: blocksToText(blocks), cached, fallbackModel, summary });
+  if (!blocks.length) {
+    broadcast({ type: "warn", text: "這一頁沒有可以畫的譯文。" });
+    return;
+  }
+  if (settings.overlay) await showOnPage(page, record, blocks);
+  else log("覆蓋層開關已關閉，譯文只顯示在側邊欄");
+  await setDrawn(page);
+  schedulePrefetch(page);
+}
+
+async function showOnPage(page, record, blocks) {
+  let res;
+  try {
+    res = await sendToPage(page.tabId, { type: "overlay", page: { key: page.key, start: page.start }, size: record.size, bg: record.bg, blocks });
+  } catch (err) {
+    broadcast({ type: "warn", text: `譯文沒辦法疊到頁面上（${err.message}）。請重新整理 Kindle 分頁再試。` });
+    return;
+  }
+  if (!res?.shown) {
+    const why = res?.reason || "頁面沒有回應";
+    broadcast({ type: "warn", text: `覆蓋層沒有顯示：${why}` });
+    log(`覆蓋層沒有顯示：${why}`);
+  } else {
+    log(`覆蓋層已畫上 ${blocks.length} 段`);
+  }
+}
+
+// ---- Prefetch ----
+
+function schedulePrefetch(page) {
+  clearTimeout(prefetchTimer);
+  prefetchTimer = setTimeout(() => {
+    prefetchNext(page).catch((err) => log(`預讀失敗：${err.message || err}`));
+  }, PREFETCH_DWELL_MS);
+}
+
+// Translate the screen after `page` ahead, if everything allows it.
+async function prefetchNext(page) {
+  if (!sameScreen(await getShown(), page)) return; // the reader moved on
+  if (!(await panelOpen())) return;
+  const settings = await getSettings();
+  if (!settings.prefetch || !settings.autoTranslate || !settings.apiKey) return;
+  if (settings.engine === "vision") return; // an Opus page is too costly to guess
+  if (prefetching) return;
+  if (background.size) {
+    log("沒有預讀下一頁：背景還在翻先前那一頁");
+    return;
+  }
+  let data;
+  try {
+    data = await sendToPage(page.tabId, { type: "pageData", key: page.key, start: page.start, next: true, image: false });
+  } catch (err) {
+    data = { error: err.message };
+  }
+  if (!data || data.error) {
+    log(`沒有預讀下一頁：${data?.error || "頁面沒有回應"}`);
+    return;
+  }
+  const next = { ...data.page, tabId: page.tabId, windowId: page.windowId };
+  const record = (await chrome.storage.session.get(recordKey(next)))[recordKey(next)];
+  if (record && (!record.paras.some((p) => p.source.trim()) || (await cachedTexts(next, record)))) {
+    log(`下一頁已經翻好（${describeScreen(next)}）`);
+    return;
+  }
+  if (!sameScreen(await getShown(), page) || prefetching) return;
+  log(`預讀下一頁：開始（${describeScreen(next)}）`);
+  startJob("prefetch", next, { settings });
+}
+
+// ---- Vision engine ----
+
+// Screenshot the reader (without our overlay), have Opus find and translate
+// the text blocks, and keep them in page pixels, like the OCR engine's.
+async function runVision(job, settings) {
+  const { page } = job;
+  if (job.kind !== "page") return;
+  broadcast({ type: "working" });
+  const started = Date.now();
   // Hide our own overlay first so it doesn't end up in the screenshot.
-  // The page answers with its page-turn counter; an overlay tagged with an
-  // older counter (user turned the page mid-request) gets dropped there.
-  let turn;
-  if (settings.overlay) {
-    try {
-      turn = (await sendToPage(tab.id, { type: "clearOverlay" }))?.turn;
-      await chrome.storage.session.remove("overlaySig");
-      log("已清掉頁面上的覆蓋層");
-    } catch (err) {
-      // Reported again by showOnPage; still translate for the side panel.
-      log(`清除覆蓋層失敗：${err.message}`);
-    }
+  try {
+    await sendToPage(page.tabId, { type: "clearOverlay" });
+  } catch (err) {
+    log(`清除覆蓋層失敗：${err.message}`);
   }
-
   // Asked right before the capture, so it matches the screenshot's layout.
-  const geometry = await pageGeometry(tab.id);
-  const dataUrl = await capture(tab.windowId);
-  const capturedAt = Date.now();
+  const geometry = await pageGeometry(page.tabId);
+  if (!geometry?.page) throw new Error("頁面沒有回報書頁的位置，沒辦法對應截圖");
+  const dataUrl = await capture(page.windowId);
   log(`截圖完成（${Math.round((dataUrl.length * 3) / 4 / 1024)} KB）`);
-  const sig = await pageSigOf(dataUrl, geometry);
-  const lastSig = await swapLastSig(sig);
-  const sameAsLast = samePage(lastSig, sig);
-  if (lastSig) log(`跟上一次截圖的差異 ${pct(lastSig, sig)}`);
-
-  // The button reads "重新翻譯本頁" while the shown translation is for this
-  // very screen; pressing it then means "ask Claude again", not "use cache".
-  const retranslate = force && samePage(sig, await getShownSig());
-  if (retranslate) log(`畫面沒變（差異 ${pct(sig, await getShownSig())}）：重新翻譯本頁，不使用快取`);
-  const cached = retranslate ? null : (await cacheGet(sig)) ?? (await backgroundResult(job, sig, tab));
-  if (job.detached) return; // turned away while waiting for the background job
-  if (cached) {
-    const blocks = cached;
-    log(`命中快取（${blocks.length} 個區塊），不呼叫 API`);
-    // Same screen re-captured (e.g. after a stray DOM change): just restore the overlay.
-    if (force || !sameAsLast) broadcast({ type: "result", text: blocksToText(blocks), cached: true, thumb: dataUrl });
-    if (settings.overlay) await showOnPage(tab.id, blocks, turn);
-    await setShownSig(sig);
+  if (!sameScreen(await getShown(), page)) {
+    log("截圖時畫面已換頁，這張截圖不用");
     return;
   }
-  if (!force && sameAsLast) {
-    log("畫面跟上次一樣，略過");
-    return;
-  }
-
-  broadcast({ type: "working", thumb: dataUrl });
-  await setShownSig(null);
-  const vision = settings.engine === "vision";
-  const image = await prepareImage(dataUrl, vision);
-  job.page = { sig, windowId: tab.windowId, tabId: tab.id };
-  const signal = job.controller.signal;
-  const translate = vision ? visionTranslator(settings, image, signal) : await ocrTranslator(settings, dataUrl, image, signal, geometry);
+  const image = await prepareImage(dataUrl);
   let reply;
   for (let attempt = 0; ; attempt++) {
-    reply = await translate();
+    reply = await visionTranslate(settings, image, job.controller.signal);
     if (!isSummary(reply)) break;
     if (attempt >= SUMMARY_RETRIES) {
       log(`重試後仍然只給摘要，先顯示摘要（不存快取）：${reply.notes || "沒有說明"}`);
@@ -702,22 +863,10 @@ async function runJob(job, { force, reason }) {
     log(`Claude 這次只給摘要，不是翻譯（${reply.notes || "沒有說明"}），自動重新請求`);
   }
   const summary = isSummary(reply);
-  const blocks = finishBlocks(reply.blocks, image);
-  if (job.detached) {
-    // Turned away from this page: just keep the translation for later.
-    if (blocks.length && !summary) {
-      await cacheSet(sig, blocks);
-      job.finish(blocks);
-      log(`背景翻完先前那一頁，已存快取（${blocks.length} 個區塊，從截圖起共 ${seconds(capturedAt)} 秒）`);
-    } else {
-      log("背景翻完先前那一頁，但沒有完整譯文，不存快取");
-    }
-    return;
-  }
-  log(`Claude 回傳 ${reply.blocks.length} 個區塊，可用 ${blocks.length} 個（從截圖起共 ${seconds(capturedAt)} 秒）`);
+  const record = { size: { width: page.width, height: page.height }, bg: page.fill, paras: visionParas(reply.blocks, image, geometry, page) };
+  log(`Claude 回傳 ${reply.blocks.length} 個區塊，可用 ${record.paras.length} 個（從截圖起共 ${seconds(started)} 秒）`);
   if (reply.notes) log(`Claude 的說明：${reply.notes}`);
-  const fallbackModel = reply.model && reply.model !== reply.requested ? reply.model : null;
-  if (!blocks.length) {
+  if (!record.paras.length) {
     // Not cached: it may be a bad capture or a model quietly declining, and a
     // cached empty page would never be retried. Show what Claude was sent.
     const why = reply.notes || "沒有說明";
@@ -725,31 +874,36 @@ async function runJob(job, { force, reason }) {
     broadcast({ type: "warn", text: `沒有任何譯文區塊（${reply.model}）：${why}` });
     return;
   }
-  // A summary isn't cached, so revisiting the page asks for a translation again.
-  if (!summary) {
-    await cacheSet(sig, blocks);
-    job.finish(blocks);
-  }
-  broadcast({ type: "result", text: blocksToText(blocks), thumb: dataUrl, fallbackModel, summary });
-  // After the result, which clears the status line.
+  if (!summary) await cacheWrite({ [visionKey(page)]: record });
+  if (job.detached || !sameScreen(await getShown(), page)) return;
+  job.drew = true;
+  const fallbackModel = reply.model && reply.model !== MODEL ? reply.model : null;
+  await draw(page, record, (p) => p.text, { fallbackModel, summary });
   if (summary) broadcast({ type: "warn", text: "Claude 只給了摘要，不是完整翻譯。可以按「重新翻譯本頁」再試。" });
-  if (!settings.overlay) await setShownSig(sig); // shown in the side panel only
-  if (settings.overlay) {
-    // The page may have changed in the last moments without a signal we
-    // caught; never draw one page's translation over another.
-    let now = sig;
-    try {
-      now = await captureSig(tab);
-    } catch (_) {}
-    if (samePage(now, sig)) {
-      if (now !== sig) log(`畫上譯文前再確認：同一頁（差異 ${pct(now, sig)}）`);
-      await showOnPage(tab.id, blocks, turn);
-      await setShownSig(sig);
-    } else {
-      log(`翻譯期間畫面已換頁（差異 ${pct(now, sig)}），這份譯文不畫上去（已存快取）`);
-      pending ??= { force: false };
-    }
+}
+
+// Opus's blocks (screenshot pixels) as record paragraphs in page pixels:
+// screenshot → viewport → the page image's box, clamped to the page, tiny
+// and blank ones dropped.
+function visionParas(blocks, image, geometry, page) {
+  const { viewport, page: box } = geometry;
+  const toX = (x) => clampTo(((x / image.width) * viewport.width - box.left) * (page.width / (box.right - box.left)), page.width);
+  const toY = (y) => clampTo(((y / image.height) * viewport.height - box.top) * (page.height / (box.bottom - box.top)), page.height);
+  const out = [];
+  for (const b of blocks) {
+    const x0 = toX(Math.min(b.x0, b.x1));
+    const x1 = toX(Math.max(b.x0, b.x1));
+    const y0 = toY(Math.min(b.y0, b.y1));
+    const y1 = toY(Math.max(b.y0, b.y1));
+    if (x1 - x0 < 2 || y1 - y0 < 2 || !b.text?.trim()) continue;
+    const lines = Math.max(1, Math.round(Number(b.lines) || 1));
+    out.push({ kind: b.kind === "heading" ? "heading" : "paragraph", text: b.text.trim(), boxes: [{ x0, y0, x1, y1, lines }], fg: page.ink });
   }
+  return out;
+}
+
+function clampTo(v, max) {
+  return Math.max(0, Math.min(max, Number.isFinite(v) ? v : 0));
 }
 
 // Where the book is drawn on the page (content.js pageGeometry), or null
@@ -763,7 +917,7 @@ async function pageGeometry(tabId) {
 }
 
 async function sendToPage(tabId, msg) {
-  // Only the top frame draws the overlay; it covers the whole viewport.
+  // Only the top frame has the page data and draws the overlay.
   try {
     return await chrome.tabs.sendMessage(tabId, msg, { frameId: 0 });
   } catch (err) {
@@ -771,136 +925,31 @@ async function sendToPage(tabId, msg) {
     // script. Inject one and retry once.
     if (!/Receiving end does not exist/.test(err.message)) throw err;
     log("頁面沒有 content script，重新注入");
-    await chrome.scripting.executeScript({ target: { tabId, frameIds: [0] }, files: ["content.js"] });
+    for (const cs of chrome.runtime.getManifest().content_scripts) {
+      await chrome.scripting.executeScript({ target: { tabId, frameIds: [0] }, files: cs.js, world: cs.world || "ISOLATED" });
+    }
     return await chrome.tabs.sendMessage(tabId, msg, { frameId: 0 });
   }
 }
 
-async function showOnPage(tabId, blocks, turn) {
-  // The switch may have been turned off while the request was in flight.
-  if (!(await getSettings()).overlay) {
-    log("覆蓋層開關已關閉，不畫");
-    return;
-  }
-  let res;
-  try {
-    res = await sendToPage(tabId, { type: "overlay", blocks, turn });
-  } catch (err) {
-    broadcast({ type: "warn", text: `譯文沒辦法疊到頁面上（${err.message}）。請重新整理 Kindle 分頁再試。` });
-    return;
-  }
-  if (!res?.shown) {
-    broadcast({ type: "warn", text: `覆蓋層沒有顯示：${res?.reason || "頁面沒有回應"}` });
-    log(`覆蓋層沒有顯示：${res?.reason || "頁面沒有回應"}`);
-  } else {
-    log(`覆蓋層已畫上 ${blocks.length} 個區塊`);
-    await rememberOverlaySig(tabId);
-  }
-}
-
-// Hash of the screen with the overlay on it, for the "dom" re-check above.
-// Not if the overlay was switched off meanwhile: that would be the bare page.
-async function rememberOverlaySig(tabId) {
-  try {
-    const { windowId } = await chrome.tabs.get(tabId);
-    const sig = await captureSig({ id: tabId, windowId });
-    if ((await sendToPage(tabId, { type: "overlayState" }))?.shown) await chrome.storage.session.set({ overlaySig: sig });
-  } catch (_) {}
-}
-
-// Downscale the screenshot to the size we send, and keep its pixels so we can
-// sample background / text colors for each block afterwards. The JPEG is only
-// needed when the screenshot itself goes to Claude (vision engine).
-async function prepareImage(dataUrl, encode) {
+// Downscale the screenshot to the size we send, as a JPEG.
+async function prepareImage(dataUrl) {
   const bitmap = await createImageBitmap(await (await fetch(dataUrl)).blob());
-  const scale = Math.min(
-    1,
-    MAX_EDGE / Math.max(bitmap.width, bitmap.height),
-    Math.sqrt(MAX_PIXELS / (bitmap.width * bitmap.height))
-  );
+  const scale = Math.min(1, MAX_EDGE / Math.max(bitmap.width, bitmap.height), Math.sqrt(MAX_PIXELS / (bitmap.width * bitmap.height)));
   const width = Math.round(bitmap.width * scale);
   const height = Math.round(bitmap.height * scale);
   const canvas = new OffscreenCanvas(width, height);
-  const ctx = canvas.getContext("2d");
-  ctx.drawImage(bitmap, 0, 0, width, height);
-  const pixels = ctx.getImageData(0, 0, width, height).data;
-  if (!encode) return { width, height, pixels };
+  canvas.getContext("2d").drawImage(bitmap, 0, 0, width, height);
   const blob = await canvas.convertToBlob({ type: "image/jpeg", quality: 0.85 });
   const base64 = bytesToBase64(new Uint8Array(await blob.arrayBuffer()));
   log(`縮圖為 ${width}×${height}（${Math.round((base64.length * 3) / 4 / 1024)} KB）`);
-  return { width, height, pixels, base64 };
+  return { width, height, base64 };
 }
 
 function bytesToBase64(bytes) {
   let bin = "";
   for (let i = 0; i < bytes.length; i += 0x8000) bin += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
   return btoa(bin);
-}
-
-// Clamp boxes, convert them to viewport fractions, and pick colors so the
-// overlay matches the reader theme (white / sepia / dark).
-function finishBlocks(raw, image) {
-  const { width: W, height: H } = image;
-  const out = [];
-  for (const b of raw) {
-    const x0 = clamp(Math.min(b.x0, b.x1), 0, W);
-    const x1 = clamp(Math.max(b.x0, b.x1), 0, W);
-    const y0 = clamp(Math.min(b.y0, b.y1), 0, H);
-    const y1 = clamp(Math.max(b.y0, b.y1), 0, H);
-    if (x1 - x0 < 4 || y1 - y0 < 4 || !b.text?.trim()) continue;
-    const bg = sampleBackground(image, x0, y0, x1, y1);
-    out.push({
-      kind: b.kind,
-      text: b.text.trim(),
-      lines: Math.max(1, Math.round(Number(b.lines) || 1)),
-      box: [x0 / W, y0 / H, x1 / W, y1 / H],
-      bg: rgb(bg),
-      fg: rgb(sampleInk(image, x0, y0, x1, y1, bg)),
-    });
-  }
-  return out;
-}
-
-function clamp(v, lo, hi) {
-  return Math.max(lo, Math.min(hi, Math.round(Number(v) || 0)));
-}
-
-function pixelAt({ width, height, pixels }, x, y) {
-  const i = (clamp(y, 0, height - 1) * width + clamp(x, 0, width - 1)) * 4;
-  return [pixels[i], pixels[i + 1], pixels[i + 2]];
-}
-
-// Median color of a ring just outside the box: the page background there.
-function sampleBackground(image, x0, y0, x1, y1) {
-  const pad = 4;
-  const pts = [];
-  for (let i = 0; i <= 20; i++) {
-    const x = x0 + ((x1 - x0) * i) / 20;
-    const y = y0 + ((y1 - y0) * i) / 20;
-    pts.push(pixelAt(image, x, y0 - pad), pixelAt(image, x, y1 + pad));
-    pts.push(pixelAt(image, x0 - pad, y), pixelAt(image, x1 + pad, y));
-  }
-  return [0, 1, 2].map((c) => pts.map((p) => p[c]).sort((a, b) => a - b)[pts.length >> 1]);
-}
-
-// The pixel inside the box that differs most from the background: the ink.
-function sampleInk(image, x0, y0, x1, y1, bg) {
-  let best = null;
-  let bestDist = -1;
-  for (let y = y0; y < y1; y += 2) {
-    for (let x = x0; x < x1; x += 2) {
-      const p = pixelAt(image, x, y);
-      const d = Math.abs(p[0] - bg[0]) + Math.abs(p[1] - bg[1]) + Math.abs(p[2] - bg[2]);
-      if (d > bestDist) [best, bestDist] = [p, d];
-    }
-  }
-  // Fall back to black/white if the box is blank (bad coordinates).
-  if (bestDist < 120) return bg[0] + bg[1] + bg[2] > 384 ? [0, 0, 0] : [255, 255, 255];
-  return best;
-}
-
-function rgb([r, g, b]) {
-  return `rgb(${r},${g},${b})`;
 }
 
 function blocksToText(blocks) {
@@ -991,7 +1040,7 @@ const TRANSLATIONS_SCHEMA = {
 };
 
 function buildTextPrompt(targetLang, paras) {
-  return `以下是使用者正在閱讀的一本已出版的書目前這一頁的文字，由 OCR 從螢幕截圖辨識出來，可能有少量辨識錯誤。請逐段翻譯給使用者閱讀。
+  return `以下是使用者正在閱讀的一本已出版的書目前這一頁的文字，由 OCR 從書頁圖片辨識出來，可能有少量辨識錯誤。請逐段翻譯給使用者閱讀。
 輸入是 JSON 陣列，每個元素是一段：id 和 text。
 1. translations：每一段一個元素，id 對應輸入，text 是該段翻成${targetLang}的譯文，只放譯文、不附原文。不要合併或拆開段落，每個 id 都要有。
 2. 依上下文修正明顯的 OCR 錯字後再翻譯。段落在頁首或頁尾被切斷時，只翻看得到的部分，不要補完。
@@ -1022,7 +1071,7 @@ const REVIEW_SCHEMA = {
 };
 
 function buildReviewPrompt(targetLang, items) {
-  return `以下是使用者正在閱讀的一本已出版的書目前這一頁的文字（由 OCR 從螢幕截圖辨識，可能有少量辨識錯誤），以及另一個模型翻成${targetLang}的初稿。請校對初稿給使用者閱讀。
+  return `以下是使用者正在閱讀的一本已出版的書目前這一頁的文字（由 OCR 從書頁圖片辨識，可能有少量辨識錯誤），以及另一個模型翻成${targetLang}的初稿。請校對初稿給使用者閱讀。
 輸入是 JSON 陣列，每個元素是一段：id、source（原文）、draft（初稿譯文）。
 1. 檢查誤譯、漏譯、語意不清、不通順或不像${targetLang}的說法，以及同一頁人名、用語前後不一致。
 2. corrections：只列出需要修改的段落，text 放修改後的完整譯文（不是只放改動的部分）。初稿沒問題的段落不要列出；全部都沒問題就給空陣列。
@@ -1034,96 +1083,22 @@ function buildReviewPrompt(targetLang, items) {
 ${JSON.stringify(items)}`;
 }
 
-// Each translator returns a function that asks Claude once and resolves to
+// Ask Opus once to find and translate the screenshot's blocks. Resolves to
 // { blocks (screenshot pixels, as in BLOCKS_SCHEMA), notes, summarized,
-// model, requested }, so a summary can be retried without redoing the OCR.
-
-function visionTranslator(settings, image, signal) {
-  return async () => {
-    const out = await callClaude(settings, {
-      signal,
-      model: MODEL,
-      effort: settings.effort,
-      fallbacks: FALLBACK,
-      schema: BLOCKS_SCHEMA,
-      content: [
-        { type: "image", source: { type: "base64", media_type: "image/jpeg", data: image.base64 } },
-        { type: "text", text: buildPrompt(settings.targetLang, image.width, image.height) },
-      ],
-    });
-    return {
-      blocks: out.blocks || [],
-      notes: (out.notes || "").trim(),
-      summarized: out.summarized === true,
-      model: out.model,
-      requested: MODEL,
-    };
-  };
-}
-
-async function ocrTranslator(settings, dataUrl, image, jobSignal, geometry) {
-  const plan = qualityOf(settings);
-  const textModel = plan.translate;
-  const started = Date.now();
-  const crop = ocrCrop(geometry);
-  const pctOf = (v) => Math.round(v * 1000) / 10;
-  log(
-    crop === OCR_CROP
-      ? "OCR 範圍：頁面沒有回報書頁位置，用預設範圍"
-      : `OCR 範圍：書頁圖片（x ${pctOf(crop.x0)}–${pctOf(crop.x1)}%，y ${pctOf(crop.y0)}–${pctOf(crop.y1)}%）`
-  );
-  log("OCR 辨識中（Tesseract 讀文字，DocLayout-YOLO 找段落和圖表）…");
-  const ocr = await ocrPage(dataUrl, crop);
-  log(`OCR 完成：${seconds(started)} 秒，${ocr.size}，${ocr.columns} 欄，${ocr.blocks.length} 段`);
-  log(ocr.layout.text);
-  setLayoutState(ocr.layout);
-  if (ocr.blocks.length) log(`OCR 文字：${ocr.blocks.map((b) => b.text).join(" ¶ ").slice(0, 400)}`);
-  const paras = ocr.blocks.map((b, id) => ({ id, text: b.text }));
-  const chunks = splitParas(paras, ocr.blocks);
-  return async () => {
-    if (!paras.length) {
-      return { blocks: [], notes: "OCR 沒有辨識到任何文字", summarized: false, model: "tesseract", requested: "tesseract" };
-    }
-    // Output speed is the bottleneck, so translate the chunks side by side.
-    const failed = new AbortController(); // one chunk failing stops the others
-    const signal = AbortSignal.any([jobSignal, failed.signal]);
-    let outs;
-    try {
-      outs = await Promise.all(
-        chunks.map(async (chunk, i) => {
-          const tag = chunks.length > 1 ? `[${i + 1}/${chunks.length}] ` : "";
-          const draft = await translateChunk(settings, chunk, tag, signal);
-          // An Opus fallback's translation doesn't need a Sonnet review.
-          return plan.review && !draft.byOpus ? reviewChunk(settings, plan.review, chunk, draft, tag, signal) : draft;
-        })
-      );
-    } catch (err) {
-      failed.abort(); // don't leave the other calls running
-      throw err;
-    }
-    const out = {
-      translations: outs.flatMap((o) => o.translations || []),
-      notes: outs.map((o) => (o.notes || "").trim()).filter(Boolean).join(" "),
-      summarized: outs.some((o) => o.summarized === true),
-      model: outs.find((o) => o.model !== textModel)?.model ?? outs[0].model, // shows when Opus stepped in
-    };
-    const byId = new Map(out.translations.map((t) => [t.id, t.text]));
-    return {
-      blocks: ocr.blocks.map((b, id) => ({
-        kind: b.kind,
-        lines: b.lines,
-        text: byId.get(id) || "",
-        x0: b.box[0] * image.width,
-        y0: b.box[1] * image.height,
-        x1: b.box[2] * image.width,
-        y1: b.box[3] * image.height,
-      })),
-      notes: (out.notes || "").trim(),
-      summarized: out.summarized === true,
-      model: out.model,
-      requested: textModel,
-    };
-  };
+// model }.
+async function visionTranslate(settings, image, signal) {
+  const out = await callClaude(settings, {
+    signal,
+    model: MODEL,
+    effort: settings.effort,
+    fallbacks: FALLBACK,
+    schema: BLOCKS_SCHEMA,
+    content: [
+      { type: "image", source: { type: "base64", media_type: "image/jpeg", data: image.base64 } },
+      { type: "text", text: buildPrompt(settings.targetLang, image.width, image.height) },
+    ],
+  });
+  return { blocks: out.blocks || [], notes: (out.notes || "").trim(), summarized: out.summarized === true, model: out.model };
 }
 
 // The text model sometimes declines a chunk (copyright) or answers with a
@@ -1194,9 +1169,10 @@ function isDeclined(out, chunk) {
   return out.summarized === true || done < chunk.length / 2 || /摘要/.test(out.notes || "");
 }
 
-// Split a page into two requests: by column on a two-page spread, otherwise
+// Split a screen into two requests: by column on a two-page spread, otherwise
 // in half by length. A page has a few hundred words, so more requests would
-// mostly add overhead.
+// mostly add overhead. `paras` ({ id, text }) and `blocks` ({ column }) are
+// parallel.
 function splitParas(paras, blocks) {
   if (paras.length < 4) return paras.length ? [paras] : [];
   const firstRight = blocks.findIndex((b) => b.column > 0);
@@ -1209,80 +1185,13 @@ function splitParas(paras, blocks) {
   return [paras.slice(0, cut), paras.slice(cut)].filter((c) => c.length);
 }
 
-// Text paragraphs of the screenshot with boxes as viewport fractions.
-async function ocrPage(dataUrl, crop = OCR_CROP) {
-  const bitmap = await createImageBitmap(await (await fetch(dataUrl)).blob());
-  const sx = bitmap.width * crop.x0;
-  const sy = bitmap.height * crop.y0;
-  const sw = bitmap.width * (crop.x1 - crop.x0);
-  const sh = bitmap.height * (crop.y1 - crop.y0);
-  const scale = Math.min(1, Math.sqrt(OCR_MAX_PIXELS / (sw * sh)));
-  const w = Math.round(sw * scale);
-  const h = Math.round(sh * scale);
-  const canvas = new OffscreenCanvas(w, h);
-  const ctx = canvas.getContext("2d");
-  ctx.drawImage(bitmap, sx, sy, sw, sh, 0, 0, w, h);
-  const rgba = ctx.getImageData(0, 0, w, h).data;
-  const gray = new Uint8Array(w * h);
-  for (let i = 0; i < gray.length; i++) gray[i] = (rgba[i * 4] * 299 + rgba[i * 4 + 1] * 587 + rgba[i * 4 + 2] * 114) / 1000;
-  const columns = findColumns({ width: w, height: h, data: gray });
-  const png = await canvas.convertToBlob({ type: "image/png" });
-  await ensureOffscreen();
-  const res = await chrome.runtime.sendMessage({
-    target: "offscreen",
-    type: "ocr",
-    image: `data:image/png;base64,${bytesToBase64(new Uint8Array(await png.arrayBuffer()))}`,
-    rects: columns.map(([x0, x1]) => ({ left: x0, top: 0, width: x1 - x0, height: h })),
-  });
-  if (res?.error?.startsWith("DocLayout-YOLO")) {
-    setLayoutState({ level: "err", text: res.error });
-    throw new Error(res.error);
-  }
-  if (!res || res.error) throw new Error(`OCR 失敗：${res?.error || "offscreen 文件沒有回應"}`);
-  const fx = (x) => (sx + x / scale) / bitmap.width;
-  const fy = (y) => (sy + y / scale) / bitmap.height;
-  const { regions } = res.layout;
-  const blocks = res.columns.flatMap((lines, column) =>
-    groupWithLayout(lines, regions[column]).map((b) => ({
-      ...b,
-      column,
-      box: [fx(b.x0), fy(b.y0), fx(b.x1), fy(b.y1)],
-    }))
-  );
-  return { blocks, columns: columns.length, size: `${w}×${h}`, layout: describeLayout(res.layout) };
-}
-
-// What the layout model did for this page, for the log and the side panel's
-// status line: { text, level: "ok" | "wait" | "err" }.
-function describeLayout({ regions, ms }) {
-  const all = regions.flat();
-  const count = (cls) => all.filter((r) => r.cls === cls).length;
-  const kept = count("figure") + count("table") + count("isolate_formula");
-  return { level: "ok", text: `DocLayout-YOLO（WebGPU）：${all.length} 個區塊，${kept} 個圖、表或公式保留原文，${ms} 毫秒` };
-}
-
-let lastLayoutState = null; // shown to a side panel that opens later
-
-function setLayoutState(state) {
-  lastLayoutState = { type: "layoutState", ...state };
-  broadcast(lastLayoutState);
-}
-
-// The first page waits for the model download; show how far along it is.
-chrome.runtime.onMessage.addListener((msg) => {
-  if (msg.type !== "layoutProgress") return;
-  const text = `DocLayout-YOLO 下載中（${Math.round(msg.progress * 100)}%，75 MB，只需下載一次）`;
-  if (msg.progress === 0) log(text);
-  setLayoutState({ level: "wait", text });
-});
-
 let creatingOffscreen = null;
 
 async function ensureOffscreen() {
   const open = await chrome.runtime.getContexts({ contextTypes: ["OFFSCREEN_DOCUMENT"] });
   if (open.length) return;
   creatingOffscreen ??= chrome.offscreen
-    .createDocument({ url: "offscreen.html", reasons: ["WORKERS"], justification: "Run Tesseract OCR in a Web Worker and the layout model on WebGPU" })
+    .createDocument({ url: "offscreen.html", reasons: ["WORKERS"], justification: "Run Tesseract OCR in a Web Worker" })
     .finally(() => (creatingOffscreen = null));
   await creatingOffscreen;
 }
@@ -1381,13 +1290,11 @@ function parseReply(content = []) {
 }
 
 // Claude flags summaries itself; the text checks catch the times it says so
-// only in the notes or by labelling blocks "（摘要）".
+// only in the notes or by labelling a block "（摘要）". `reply` has either
+// `texts` (OCR engine) or `blocks` (vision engine).
 function isSummary(reply) {
-  return (
-    reply.summarized ||
-    /摘要/.test(reply.notes) ||
-    reply.blocks.some((b) => /^[（(]\s*摘要/.test((b.text || "").trim()))
-  );
+  const texts = reply.texts ?? (reply.blocks || []).map((b) => b.text || "");
+  return reply.summarized === true || /摘要/.test(reply.notes || "") || texts.some((t) => /^[（(]\s*摘要/.test((t || "").trim()));
 }
 
 // Reassemble a Messages API event stream into the shape of a non-streamed

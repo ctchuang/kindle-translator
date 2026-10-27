@@ -1,50 +1,123 @@
+// content.js in a fake Kindle page: keeping the page data page-hook.js
+// passes over, noticing a new page image and telling which screen it is,
+// answering the background's questions, and drawing the overlay.
+
 const test = require("node:test");
 const assert = require("node:assert/strict");
 const { TIME_SCALE, plain, waitFor, source } = require("./helpers/load");
 const { createChrome } = require("./helpers/chrome");
 const { loadPage } = require("./helpers/dom");
+const { makeBook, words } = require("./helpers/kindle");
+const raster = require("./helpers/raster");
 
-// content.js waits 1200 ms after the last hint before reporting a turn.
-const DEBOUNCE = 1200 / TIME_SCALE;
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-const settle = () => sleep(DEBOUNCE * 3);
+const READER_HTML = '<html><body><div id="kr-renderer"><div class="kg-full-page-img"><img /></div></div></body></html>';
 
-function setup(t, { sync = {}, top, innerWidth = 1000, innerHeight = 800, globals } = {}) {
-  const chrome = createChrome({ sync });
-  // The background answers pageTurned with nothing; without a handler the
-  // fake rejects, which would be an unhandled rejection here.
+function setup(t, { sync = {}, innerWidth = 1000, innerHeight = 800, html = READER_HTML, globals = {}, runtimeId } = {}) {
+  const chrome = createChrome({ sync, runtimeId });
+  // The background: answers nothing, but records what it was sent.
   chrome._.runtimeMessageHandler = () => undefined;
-  const page = loadPage(["content.js"], { chrome, top, innerWidth, innerHeight, globals });
+  const page = loadPage(["page-render.js", "content.js"], {
+    chrome,
+    html,
+    innerWidth,
+    innerHeight,
+    globals: {
+      OffscreenCanvas: raster.OffscreenCanvas,
+      Path2D: raster.Path2D,
+      async createImageBitmap(img) {
+        if (!img.__pixels) throw new Error("no pixels");
+        return { ...img.__pixels };
+      },
+      ...globals,
+    },
+  });
   t.after(() => page.close());
-  const turns = () => chrome._.runtimeMessages.filter((m) => m.type === "pageTurned").map((m) => m.reason);
+  const sent = (type) => chrome._.runtimeMessages.filter((m) => m.type === type);
   // Send a runtime message the way the background's tabs.sendMessage does.
   const send = (msg) => {
     const replies = [];
     const [ret] = chrome.runtime.onMessage.dispatch(msg, {}, (r) => replies.push(plain(r)));
     return { ret, replies };
   };
-  const overlay = () => page.$("kindle-translator-overlay");
-  const toggle = () => page.$("kindle-translator-toggle");
-  return { chrome, page, turns, send, overlay, toggle };
+  const ask = async (msg) => {
+    const { replies } = send(msg);
+    await waitFor(() => replies.length, { what: `reply to ${msg.type}` });
+    return replies[0];
+  };
+  const img = () => page.document.querySelector(".kg-full-page-img img");
+  if (img()) place(img(), [0, 0, innerWidth, innerHeight]);
+  const s = { chrome, page, sent, send, ask, img, overlay: () => page.$("kindle-translator-overlay"), toggle: () => page.$("kindle-translator-toggle") };
+  return s;
 }
 
-const key = (s, k) => s.page.fire(s.page.document, "keydown", { key: k });
+function place(el, [left, top, width, height]) {
+  Object.assign(el.style, { position: "absolute", left: `${left}px`, top: `${top}px`, width: `${width}px`, height: `${height}px` });
+}
 
-// Two paragraphs of one column, a heading above and a short single line below.
-const BLOCKS = [
-  { kind: "heading", box: [0.1, 0.05, 0.9, 0.1], lines: 1, text: "第一章", bg: "#ffffff", fg: "#000000" },
-  { kind: "paragraph", box: [0.1, 0.15, 0.9, 0.4], lines: 5, text: "他走進房間。".repeat(20), bg: "#fafafa", fg: "#111111" },
-  { kind: "paragraph", box: [0.1, 0.45, 0.9, 0.7], lines: 5, text: "她沒有回頭。".repeat(20), bg: "#fafafa", fg: "#111111" },
-  { kind: "paragraph", box: [0.1, 0.75, 0.3, 0.8], lines: 1, text: "好。", bg: "#eeeeee", fg: "#222222" },
-];
+// The page posts a /renderer/render response (as page-hook.js does).
+async function deliver(s, layout, from = 0, count = 6, { url, buf } = {}) {
+  const r = layout.response(from, count);
+  const bytes = buf ?? r.bytes.buffer.slice(r.bytes.byteOffset, r.bytes.byteOffset + r.bytes.byteLength);
+  s.page.window.postMessage({ type: "kindle-translator-render", url: url ?? r.url, buf: bytes }, "*");
+  await sleep(5);
+}
 
-// Shows `blocks` and waits for the after-paint reply.
-function show(s, blocks = BLOCKS, turn) {
-  const r = s.send({ type: "overlay", blocks, turn });
+// The reader shows screen `index` of `layout`: a new blob URL and its pixels.
+let blobs = 0;
+async function show(s, layout, index, { complete = true, wait = true } = {}) {
+  const img = s.img();
+  const screen = layout.screens[index];
+  img.src = `blob:https://read.amazon.com/${++blobs}`;
+  img.__pixels = raster.readerPixels(screen, layout.fonts, Number(layout.params.rasterScale));
+  img.complete = complete;
+  img.naturalWidth = complete ? img.__pixels.width : 0;
+  img.naturalHeight = complete ? img.__pixels.height : 0;
+  const before = s.sent("pageShown").length;
+  s.page.mutate([{ type: "attributes", target: img, attributeName: "src" }]);
+  if (!wait) return null;
+  await waitFor(() => s.sent("pageShown").length > before, { what: "pageShown" });
+  return plain(s.sent("pageShown").at(-1));
+}
+
+const book = makeBook({
+  paragraphs: [
+    { text: "Chapter One", heading: true },
+    ...Array.from({ length: 24 }, (_, i) => `${words(i, 36)}.`),
+    { image: true, lines: 12 },
+    ...Array.from({ length: 12 }, (_, i) => `${words(i + 40, 36)}.`),
+  ],
+});
+const L = book.layout();
+
+// A page showing screen 0 of L, identified.
+async function ready(t, opts) {
+  const s = setup(t, opts);
+  await deliver(s, L, 0, 6);
+  s.shown = (await show(s, L, 0)).page;
+  return s;
+}
+
+function overlayMsg(shown, blocks, { size = { width: 1000, height: 800 }, bg = "#fafafa" } = {}) {
+  return { type: "overlay", page: { key: shown.key, start: shown.start }, size, bg, blocks };
+}
+
+// Draws `msg` and lets the after-paint reply through.
+function draw(s, msg) {
+  const r = s.send(msg);
   s.page.frame();
   s.page.frame();
   return r;
 }
+
+// Paragraph boxes in page pixels; with a 1000×800 page drawn over the whole
+// 1000×800 viewport they're viewport pixels too.
+const BLOCKS = [
+  { kind: "heading", text: "第一章", fg: "#000000", boxes: [{ x0: 100, y0: 40, x1: 900, y1: 80, lines: 1 }] },
+  { kind: "paragraph", text: "他走進房間。".repeat(20), fg: "#111111", boxes: [{ x0: 100, y0: 120, x1: 900, y1: 320, lines: 5 }] },
+  { kind: "paragraph", text: "她沒有回頭。".repeat(20), fg: "#111111", boxes: [{ x0: 100, y0: 360, x1: 900, y1: 560, lines: 5 }] },
+  { kind: "paragraph", text: "好。", fg: "#222222", boxes: [{ x0: 100, y0: 600, x1: 300, y1: 640, lines: 1 }] },
+];
 
 // ---- Loading ----
 
@@ -52,197 +125,505 @@ test("the guard refuses to run a second time in the same window", (t) => {
   assert.throws(() => setup(t, { globals: { __kindleTranslatorLoaded: true } }), /already loaded/);
 });
 
-test("re-injecting into the same page doesn't add a second set of listeners", async (t) => {
+test("re-injecting into the same page doesn't add a second set of listeners", (t) => {
   const s = setup(t);
-  // Its top-level const declarations already exist, so the script fails
-  // before running; either way nothing is registered twice.
   assert.throws(() => s.page.ctx.run(source("content.js")));
-  assert.equal(s.page.document._listeners.filter((l) => l.type === "keydown").length, 1);
-  key(s, "ArrowRight");
-  await settle();
-  assert.deepEqual(s.turns(), ["key"]);
+  assert.equal(s.page.window._listeners.filter((l) => l.type === "message").length, 1);
+  assert.equal(s.page.observers.length, 1);
 });
 
-// ---- Page-turn hints ----
+test("the manifest loads the hook in the page's world first, then page-render.js and content.js", () => {
+  const manifest = JSON.parse(source("manifest.json"));
+  const [hook, cs] = manifest.content_scripts;
+  assert.deepEqual(hook.js, ["page-hook.js"]);
+  assert.equal(hook.world, "MAIN");
+  assert.equal(hook.run_at, "document_start");
+  assert.deepEqual(cs.js, ["page-render.js", "content.js"]);
+  assert.equal(cs.world, undefined);
+  assert.equal(cs.run_at, "document_start");
+  assert.ok(!cs.all_frames && !hook.all_frames, "top frame only");
+});
 
-test("navigation keys report a page turn after the debounce", async (t) => {
-  for (const k of ["ArrowLeft", "ArrowRight", "PageUp", "PageDown", " ", "Enter"]) {
-    const s = setup(t);
-    key(s, k);
-    assert.deepEqual(s.turns(), [], "waits for the page to settle");
-    await settle();
-    assert.deepEqual(s.turns(), ["key"], k);
+// ---- Page data ----
+
+test("a render response from page-hook.js is kept and logged", async (t) => {
+  const s = setup(t);
+  await deliver(s, L, 0, 6);
+  assert.match(s.sent("pageLog")[0].text, /^收到閱讀器的頁面資料：6 個畫面（\d+ KB）$/);
+  const layouts = s.page.ctx.run("layouts");
+  assert.equal(layouts.size, 1);
+  assert.equal(layouts.get(L.key).pages.size, 6);
+});
+
+test("messages that aren't the hook's copy are ignored", async (t) => {
+  const s = setup(t);
+  const { url, bytes } = L.response(0, 6);
+  const buf = bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength);
+  // From another window (an ad frame, say).
+  s.page.fire(s.page.window, "message", { data: { type: "kindle-translator-render", url, buf }, source: {} });
+  // Not a render URL, not a URL at all, not bytes, or no URL.
+  for (const data of [
+    { type: "kindle-translator-render", url: "https://read.amazon.com/renderer/wordCount", buf },
+    { type: "kindle-translator-render", url: "not a url", buf },
+    { type: "kindle-translator-render", url, buf: "text" },
+    { type: "kindle-translator-render", buf },
+    { type: "something-else", url, buf },
+  ]) {
+    s.page.window.postMessage(data, "*");
+  }
+  await sleep(10);
+  assert.equal(s.page.ctx.run("layouts").size, 0);
+  assert.equal(s.sent("pageLog").length, 0);
+});
+
+test("data it can't read is logged, not kept", async (t) => {
+  const s = setup(t);
+  await deliver(s, L, 0, 6, { buf: new Uint8Array([1, 2, 3]).buffer });
+  assert.match(s.sent("pageLog")[0].text, /^閱讀器的頁面資料看不懂：/);
+  assert.equal(s.page.ctx.run("layouts").size, 0);
+});
+
+test("batches of one layout are merged screen by screen", async (t) => {
+  const s = setup(t);
+  await deliver(s, L, 0, 6);
+  await deliver(s, L, 6, 6);
+  await deliver(s, L, 3, 6); // overlapping
+  const layout = s.page.ctx.run("layouts").get(L.key);
+  assert.equal(layout.pages.size, 12);
+});
+
+test("each screen is drawn with its own batch's glyphs, which are numbered per batch", async (t) => {
+  const s = setup(t);
+  await deliver(s, L, 0, 6);
+  await deliver(s, L, 6, 6);
+  // Screens from both batches, in either order, are identified...
+  for (const i of [1, 7, 2, 9]) assert.equal((await show(s, L, i)).page.start, L.screens[i].startPositionId, `screen ${i}`);
+  // ...and the drawing OCR gets after a later batch came is still right.
+  await deliver(s, L, 12, 6);
+  const shown = (await show(s, L, 2)).page;
+  let drawn = null;
+  const real = s.page.ctx.renderPage;
+  s.page.ctx.renderPage = (...args) => (drawn = real(...args));
+  await s.ask({ type: "pageData", key: L.key, start: shown.start, image: true });
+  const { pixelDiff, imageMasks } = require("../page-render.js");
+  const truth = raster.readerPixels(L.screens[2], L.fonts, 2); // black on white already
+  assert.equal(pixelDiff(drawn.data, truth.data, truth.width, imageMasks(L.screens[2], 2)), 0);
+});
+
+test("a new layout is added; past two, the oldest not on screen goes", async (t) => {
+  const s = setup(t);
+  const big = book.layout({ fontSize: 12 });
+  const dark = book.layout({ theme: "dark" });
+  await deliver(s, L, 0, 6);
+  await show(s, L, 0);
+  await deliver(s, big, 0, 6);
+  await deliver(s, dark, 0, 6);
+  const keys = [...s.page.ctx.run("layouts").keys()];
+  assert.deepEqual(keys, [L.key, dark.key], "the one on screen stays; the unused one goes");
+});
+
+test("past MAX_SCREENS, the screens farthest from the one shown go", async (t) => {
+  const s = setup(t);
+  const long = makeBook({ paragraphs: Array.from({ length: 300 }, (_, i) => `${words(i, 30)}.`) }).layout();
+  assert.ok(long.screens.length > 60);
+  await deliver(s, long, 20, 6);
+  await show(s, long, 22);
+  for (let from = 0; from < 60; from += 6) await deliver(s, long, from, 6);
+  const starts = [...s.page.ctx.run("layouts").get(long.key).pages.keys()].sort((a, b) => a - b);
+  assert.equal(starts.length, s.page.ctx.run("MAX_SCREENS"));
+  assert.ok(starts.includes(long.screens[22].startPositionId));
+  assert.ok(!starts.includes(long.screens[59].startPositionId), "the far end went");
+});
+
+// ---- Which screen ----
+
+test("a new page image is identified and reported", async (t) => {
+  const s = setup(t);
+  await deliver(s, L, 0, 6);
+  const msg = await show(s, L, 2);
+  const screen = L.screens[2];
+  assert.deepEqual(msg.page, {
+    key: L.key,
+    start: screen.startPositionId,
+    end: screen.endPositionId,
+    asin: "B0TESTBOOK",
+    revision: "rev1",
+    width: 300,
+    height: 200,
+    fill: "#ffffff",
+    ink: "#000000",
+  });
+  assert.ok(msg.tried >= 1 && msg.tried <= 6);
+  assert.equal(typeof msg.ms, "number");
+});
+
+test("every screen of the batch is told apart, including an illustration alone", async (t) => {
+  const s = setup(t);
+  const one = book.layout({ columns: 1 });
+  await deliver(s, one, 0, 40);
+  const only = one.screens.findIndex((sc) => sc.children.every((c) => c.type === "image"));
+  assert.ok(only > 0);
+  for (const i of [0, 1, only, only + 1, 3]) {
+    assert.equal((await show(s, one, i)).page.start, one.screens[i].startPositionId, `screen ${i}`);
   }
 });
 
-test("other keys are not page turns", async (t) => {
+test("candidates nearest the previous screen are tried first", async (t) => {
   const s = setup(t);
-  for (const k of ["a", "Shift", "ArrowUp", "Escape"]) key(s, k);
-  await settle();
-  assert.deepEqual(s.turns(), []);
+  await deliver(s, L, 0, 12);
+  await show(s, L, 7);
+  const msg = await show(s, L, 8);
+  assert.ok(msg.tried <= 2, `tried ${msg.tried}`);
 });
 
-test("click and wheel report their reason", async (t) => {
-  const s = setup(t);
-  s.page.document.body.click();
-  await settle();
-  s.page.fire(s.page.document.body, "wheel", { deltaY: 100 });
-  await settle();
-  assert.deepEqual(s.turns(), ["click", "wheel"]);
+test("the overlay goes the moment the page image changes, before identifying", async (t) => {
+  const s = await ready(t);
+  draw(s, overlayMsg(s.shown, BLOCKS));
+  assert.equal(s.overlay().childElementCount, 4);
+  const pending = show(s, L, 1);
+  assert.equal(s.overlay().childElementCount, 0, "cleared synchronously in the observer");
+  await pending;
 });
 
-test("a burst of hints collapses into one message with the last reason", async (t) => {
-  const s = setup(t);
-  key(s, "ArrowRight");
-  key(s, "ArrowRight");
-  s.page.fire(s.page.document.body, "wheel");
-  s.page.document.body.click();
-  await settle();
-  assert.deepEqual(s.turns(), ["click"]);
+test("mutations that leave the page image alone change nothing", async (t) => {
+  const s = await ready(t);
+  draw(s, overlayMsg(s.shown, BLOCKS));
+  const n = s.sent("pageShown").length;
+  s.page.mutate([{ type: "childList", target: s.page.document.body, addedNodes: [{}], removedNodes: [] }]);
+  s.page.mutate([{ type: "attributes", target: s.img(), attributeName: "style" }]);
+  await sleep(10);
+  assert.equal(s.sent("pageShown").length, n);
+  assert.equal(s.overlay().childElementCount, 4);
 });
 
-test("a user action clears the overlay and bumps the turn counter", async (t) => {
+test("mutations inside the overlay alone aren't even looked at", async (t) => {
+  const s = await ready(t);
+  draw(s, overlayMsg(s.shown, BLOCKS));
+  s.img().src = "blob:changed-behind-our-back";
+  s.page.mutate([{ type: "childList", target: s.overlay(), addedNodes: [], removedNodes: [] }]);
+  assert.equal(s.overlay().childElementCount, 4);
+});
+
+test("an image still loading is identified once it has loaded", async (t) => {
   const s = setup(t);
-  show(s, BLOCKS, 0);
-  assert.equal(s.overlay().childElementCount, BLOCKS.length);
-  key(s, "ArrowRight");
-  assert.equal(s.overlay().childElementCount, 0, "cleared at once, before the debounce");
-  const { replies } = s.send({ type: "clearOverlay" });
-  s.page.frame();
-  s.page.frame();
-  assert.deepEqual(replies, [{ turn: 1 }]);
-  // The overlay translated for turn 0 is now stale.
-  assert.deepEqual(s.send({ type: "overlay", blocks: BLOCKS, turn: 0 }).replies, [
-    { shown: false, reason: "請求期間翻頁了，已丟棄舊頁的譯文" },
+  await deliver(s, L, 0, 6);
+  await show(s, L, 1, { complete: false, wait: false });
+  await sleep(10);
+  assert.equal(s.sent("pageShown").length, 0);
+  const img = s.img();
+  img.complete = true;
+  img.naturalWidth = img.__pixels.width;
+  s.page.fire(img, "load");
+  await waitFor(() => s.sent("pageShown").length, { what: "pageShown" });
+  assert.equal(s.sent("pageShown")[0].page.start, L.screens[1].startPositionId);
+});
+
+test("an image that fails to load is reported", async (t) => {
+  const s = setup(t);
+  await deliver(s, L, 0, 6);
+  await show(s, L, 1, { complete: false, wait: false });
+  s.page.fire(s.img(), "error");
+  await waitFor(() => s.sent("pageShown").length, { what: "pageShown" });
+  assert.equal(s.sent("pageShown")[0].error, "辨識目前這一頁失敗：書頁圖片載入失敗");
+});
+
+test("an identification overtaken by a newer page image isn't reported", async (t) => {
+  const s = setup(t);
+  await deliver(s, L, 0, 6);
+  await show(s, L, 1, { complete: false, wait: false });
+  await show(s, L, 2);
+  // The first image's load comes late, after the second was identified.
+  s.page.fire(s.img(), "load");
+  await sleep(20);
+  assert.deepEqual(
+    s.sent("pageShown").map((m) => m.page?.start),
+    [L.screens[2].startPositionId]
+  );
+});
+
+test("without any page data yet, it says to reload; data arriving later fixes it", async (t) => {
+  const s = setup(t);
+  const msg = await show(s, L, 1);
+  assert.deepEqual(msg, { type: "pageShown", error: "還沒收到閱讀器的頁面資料，請重新整理 Kindle 分頁" });
+  await deliver(s, L, 0, 6);
+  await waitFor(() => s.sent("pageShown").length === 2, { what: "second pageShown" });
+  assert.equal(s.sent("pageShown")[1].page.start, L.screens[1].startPositionId);
+});
+
+test("a screen missing from the data is reported, and found once its batch comes", async (t) => {
+  const s = setup(t);
+  await deliver(s, L, 0, 6);
+  const msg = await show(s, L, 8);
+  assert.equal(msg.error, "閱讀器的頁面資料裡找不到目前這一頁");
+  await deliver(s, L, 6, 6);
+  await waitFor(() => s.sent("pageShown").length === 2, { what: "found" });
+  assert.equal(s.sent("pageShown")[1].page.start, L.screens[8].startPositionId);
+});
+
+test("a new batch doesn't re-identify a screen already known", async (t) => {
+  const s = await ready(t);
+  await deliver(s, L, 6, 6);
+  await sleep(10);
+  assert.equal(s.sent("pageShown").length, 1);
+});
+
+test("after a settings change, the screen is found in the new layout", async (t) => {
+  const s = await ready(t);
+  const sepia = book.layout({ theme: "sepia" });
+  await deliver(s, sepia, 0, 6);
+  const msg = await show(s, sepia, 0);
+  assert.equal(msg.page.key, sepia.key);
+  assert.equal(msg.page.fill, "#e7dec7");
+  assert.equal(msg.page.ink, "#5d4232");
+});
+
+test("a page image removed (the reader loading) reports nothing", async (t) => {
+  const s = await ready(t);
+  s.img().parentNode.replaceChildren();
+  s.page.mutate([{ type: "childList", target: s.page.document.body, addedNodes: [], removedNodes: [{}] }]);
+  await sleep(10);
+  assert.equal(s.sent("pageShown").length, 1);
+  assert.deepEqual(await s.ask({ type: "currentPage" }), { error: "還不知道目前是哪一頁" });
+});
+
+test("once the extension is reloaded, the orphaned script reports nothing", async (t) => {
+  const s = setup(t);
+  await deliver(s, L, 0, 6);
+  delete s.chrome.runtime.id;
+  await show(s, L, 1, { wait: false });
+  await sleep(20);
+  assert.equal(s.sent("pageShown").length, 0);
+});
+
+test("the screen already showing when the script starts is identified once data comes", async (t) => {
+  const html = READER_HTML.replace("<img />", '<img src="blob:already" />');
+  const s = setup(t, { html });
+  const img = s.img();
+  img.src = "blob:already";
+  img.__pixels = raster.readerPixels(L.screens[0], L.fonts, 2);
+  img.complete = true;
+  img.naturalWidth = img.__pixels.width;
+  // Loaded at document start, the script saw no image; this is the next check.
+  s.page.mutate([{ type: "childList", target: s.page.document.body, addedNodes: [img], removedNodes: [] }]);
+  await waitFor(() => s.sent("pageShown").length, { what: "first report" });
+  await deliver(s, L, 0, 6);
+  await waitFor(() => s.sent("pageShown").some((m) => m.page), { what: "identified" });
+});
+
+// ---- Answering the background ----
+
+test("currentPage: the screen identified, an error before, and it waits for one in progress", async (t) => {
+  const s = setup(t);
+  assert.deepEqual(await s.ask({ type: "currentPage" }), { error: "還不知道目前是哪一頁" });
+  await deliver(s, L, 0, 6);
+  show(s, L, 3, { wait: false });
+  const reply = await s.ask({ type: "currentPage" });
+  assert.equal(reply.page.start, L.screens[3].startPositionId);
+});
+
+test("currentPage after a failure says why", async (t) => {
+  const s = setup(t);
+  await show(s, L, 1);
+  assert.deepEqual(await s.ask({ type: "currentPage" }), { error: "還沒收到閱讀器的頁面資料，請重新整理 Kindle 分頁" });
+});
+
+test("pageData: the screen, its paragraphs and columns", async (t) => {
+  const s = await ready(t);
+  const reply = await s.ask({ type: "pageData", key: L.key, start: s.shown.start });
+  assert.deepEqual(reply.page, s.shown);
+  assert.deepEqual(reply.columns, [
+    [0, 150],
+    [150, 300],
   ]);
+  const { pageParagraphs } = require("../page-render.js");
+  assert.deepEqual(reply.paragraphs, plain(pageParagraphs(L.screens[0])));
+  assert.equal(reply.image, undefined);
 });
 
-// ---- DOM mutations ----
-
-test("fewer than two significant changes are ignored", async (t) => {
-  const s = setup(t);
-  const body = s.page.document.body;
-  const node = s.page.document.createElement("span");
-  s.page.mutate([{ type: "childList", target: body, addedNodes: [node], removedNodes: [] }]);
-  s.page.mutate([{ type: "attributes", target: body, attributeName: "style", addedNodes: [], removedNodes: [] }]);
-  await settle();
-  assert.deepEqual(s.turns(), []);
+test("pageData with image: the screen drawn as a PNG at the raster scale", async (t) => {
+  const s = await ready(t);
+  const reply = await s.ask({ type: "pageData", key: L.key, start: s.shown.start, image: true });
+  assert.equal(reply.scale, 2);
+  assert.match(reply.image, /^data:image\/png;base64,/);
+  const drawn = JSON.parse(Buffer.from(reply.image.split(",")[1], "base64").toString());
+  assert.deepEqual([drawn.width, drawn.height], [600, 400]);
 });
 
-test("two or more significant changes report 'dom' without clearing the overlay", async (t) => {
+test("pageData's image is drawn black on white, even in a dark theme", async (t) => {
   const s = setup(t);
-  show(s);
-  const body = s.page.document.body;
-  const [a, b] = [s.page.document.createElement("div"), s.page.document.createElement("div")];
-  s.page.mutate([{ type: "childList", target: body, addedNodes: [a], removedNodes: [b] }]);
-  await settle();
-  s.page.mutate([
-    { type: "attributes", target: a, attributeName: "src", addedNodes: [], removedNodes: [] },
-    { type: "attributes", target: a, attributeName: "style", addedNodes: [], removedNodes: [] },
-  ]);
-  await settle();
-  assert.deepEqual(s.turns(), ["dom", "dom"]);
-  assert.equal(s.overlay().childElementCount, BLOCKS.length);
+  const dark = book.layout({ theme: "dark" });
+  await deliver(s, dark, 0, 6);
+  const shown = (await show(s, dark, 1)).page;
+  let plainDrawn = null;
+  const real = s.page.ctx.renderPage;
+  s.page.ctx.renderPage = (...args) => {
+    const c = real(...args);
+    if (args[4]?.plain) plainDrawn = c;
+    return c;
+  };
+  await s.ask({ type: "pageData", key: dark.key, start: shown.start, image: true });
+  assert.ok(plainDrawn, "drawn plain");
+  assert.equal(plainDrawn.ops[0].color, "#ffffff");
+  assert.ok(plainDrawn.ops.slice(1).every((o) => o.color === "#000000"));
 });
 
-test("changes to the overlay and the toggle button are not page changes", async (t) => {
-  const s = setup(t);
-  show(s);
-  await waitFor(s.toggle, { what: "toggle" });
-  const boxes = s.overlay().children;
-  s.page.mutate([
-    { type: "childList", target: s.overlay(), addedNodes: boxes, removedNodes: [] },
-    { type: "attributes", target: boxes[0], attributeName: "style", addedNodes: [], removedNodes: [] },
-    { type: "childList", target: s.page.document.documentElement, addedNodes: [s.overlay(), s.toggle()], removedNodes: [] },
-    { type: "childList", target: s.toggle(), addedNodes: ["顯示原文", "x"], removedNodes: ["顯示譯文"] },
-  ]);
-  await settle();
-  assert.deepEqual(s.turns(), []);
+test("pageData next: the screen right after, or an error when it hasn't come", async (t) => {
+  const s = await ready(t);
+  const next = await s.ask({ type: "pageData", key: L.key, start: L.screens[0].startPositionId, next: true });
+  assert.equal(next.page.start, L.screens[1].startPositionId);
+  assert.deepEqual(await s.ask({ type: "pageData", key: L.key, start: L.screens[5].startPositionId, next: true }), { error: "頁面資料裡還沒有下一頁" });
+  // A batch further on doesn't count as the next screen.
+  await deliver(s, L, 7, 6);
+  assert.deepEqual(await s.ask({ type: "pageData", key: L.key, start: L.screens[5].startPositionId, next: true }), { error: "頁面資料裡還沒有下一頁" });
+  await deliver(s, L, 6, 1);
+  assert.equal((await s.ask({ type: "pageData", key: L.key, start: L.screens[5].startPositionId, next: true })).page.start, L.screens[6].startPositionId);
 });
 
-test("a user action is not overwritten by the re-render that follows it", async (t) => {
-  const s = setup(t);
-  const body = s.page.document.body;
-  const churn = () =>
-    s.page.mutate([{ type: "childList", target: body, addedNodes: [{}, {}], removedNodes: [] }]);
-  key(s, "ArrowRight");
-  churn();
-  await settle();
-  // ...but a user action does replace a pending "dom".
-  churn();
-  s.page.document.body.click();
-  await settle();
-  assert.deepEqual(s.turns(), ["key", "click"]);
+test("pageData for a layout or screen it doesn't have", async (t) => {
+  const s = await ready(t);
+  assert.deepEqual(await s.ask({ type: "pageData", key: "other", start: 1 }), { error: "這個版面的頁面資料已經不在了" });
+  assert.deepEqual(await s.ask({ type: "pageData", key: L.key, start: 12345 }), { error: "頁面資料裡沒有這一頁" });
+  assert.deepEqual(await s.ask({ type: "pageData", key: L.key, start: 12345, next: true }), { error: "頁面資料裡還沒有下一頁" });
 });
 
-// ---- Resize ----
+test("pageData reports a drawing failure instead of throwing", async (t) => {
+  const s = await ready(t);
+  s.page.ctx.OffscreenCanvas = class {
+    constructor() {
+      throw new Error("out of memory");
+    }
+  };
+  assert.deepEqual(await s.ask({ type: "pageData", key: L.key, start: s.shown.start, image: true }), { error: "out of memory" });
+});
 
-test("a real window resize is a page turn; a same-size resize only re-checks", async (t) => {
+test("dumpPage: the screen's data with only the glyphs it uses", async (t) => {
+  const s = await ready(t);
+  const { filename, data } = (await s.ask({ type: "dumpPage" }));
+  assert.equal(filename, `kindle-B0TESTBOOK-${s.shown.start}.json`);
+  assert.equal(data.params.asin, "B0TESTBOOK");
+  assert.equal(data.page.startPositionId, s.shown.start);
+  const used = new Set(data.page.children.filter((c) => c.type === "run").flatMap((r) => r.glyphs));
+  for (const f of Object.values(data.fonts)) for (const g of Object.keys(f.glyphs)) assert.ok(used.has(Number(g)));
+  assert.ok(Object.keys(data.fonts.testserifNormal.glyphs).length > 5);
+});
+
+test("dumpPage before a screen is known", async (t) => {
   const s = setup(t);
-  show(s);
-  s.page.resize(1000, 800);
-  await settle();
-  assert.deepEqual(s.turns(), ["dom"]);
-  assert.equal(s.overlay().childElementCount, BLOCKS.length, "toolbar slide keeps the overlay");
-  s.page.resize(1200, 800);
+  assert.deepEqual(await s.ask({ type: "dumpPage" }), { error: "還不知道目前是哪一頁" });
+});
+
+test("debugLog goes to the console", async (t) => {
+  const lines = [];
+  const s = setup(t, { globals: { console: { ...console, log: (x) => lines.push(x) } } });
+  s.send({ type: "debugLog", text: "12:00:00.000 hello" });
+  assert.deepEqual(lines, ["[Kindle 翻譯] 12:00:00.000 hello"]);
+});
+
+test("messages it doesn't know get no reply", (t) => {
+  const s = setup(t);
+  assert.equal(s.send({ type: "nope" }).ret, undefined);
+});
+
+// ---- Overlay ----
+
+test("an overlay for the screen on show is drawn over the page image", async (t) => {
+  const s = await ready(t);
+  const { ret, replies } = draw(s, overlayMsg(s.shown, BLOCKS));
+  assert.equal(ret, true);
+  assert.deepEqual(replies, [{ shown: true }]);
+  const root = s.overlay();
+  assert.equal(root.style.pointerEvents, "none", "clicks still reach the reader");
+  const [heading, a, b, single] = root.children;
+  const geom = (el) => [el.style.left, el.style.top, el.style.width, el.style.height];
+  // 3px padding, line height 40px (5 lines in 200px), so each box grows by
+  // up to half a line (20px) towards a neighbour and not past the first or
+  // last block.
+  assert.deepEqual(geom(heading), ["97px", "37px", "806px", "66px"]);
+  assert.deepEqual(geom(a), ["97px", "97px", "806px", "246px"]);
+  assert.deepEqual(geom(b), ["97px", "337px", "806px", "246px"]);
+  // The short single line runs to the column's right edge (900px).
+  assert.deepEqual(geom(single), ["97px", "577px", "806px", "66px"]);
+  assert.equal(heading.style.fontWeight, "700");
+  assert.equal(a.style.fontWeight, "400");
+  assert.equal(a.style.lineHeight, "1.5");
+  assert.equal(single.style.lineHeight, "1.2");
+  assert.equal(single.style.whiteSpace, "pre");
+  assert.equal(heading.style.display, undefined, "a heading is never treated as a single line");
+  assert.deepEqual([a.style.background, a.style.color], ["#fafafa", "#111111"]);
+  assert.deepEqual([single.style.background, single.style.color], ["#fafafa", "#222222"]);
+  assert.equal(a.textContent, BLOCKS[1].text);
+});
+
+test("page pixels are mapped through where the reader draws the page image", async (t) => {
+  const s = await ready(t);
+  place(s.img(), [100, 50, 600, 400]);
+  const blocks = [{ kind: "paragraph", text: "譯文", fg: "#000", boxes: [{ x0: 10, y0: 20, x1: 140, y1: 60, lines: 3 }] }];
+  draw(s, overlayMsg(s.shown, blocks, { size: { width: 300, height: 200 } }));
+  const [box] = s.overlay().children;
+  // ×2: 10,20 → 120,90; 140,60 → 380,170; plus the 3px pad.
+  assert.deepEqual([box.style.left, box.style.top, box.style.width, box.style.height], ["117px", "87px", "266px", "86px"]);
+});
+
+test("a paragraph spanning two columns gets two boxes, its text split by their lines", async (t) => {
+  const s = await ready(t);
+  const text = "前半段的文字，在左邊那一欄的最後幾行。後半段的文字在右邊那一欄的最上面。";
+  const blocks = [{ kind: "paragraph", text, fg: "#000", boxes: [{ x0: 50, y0: 600, x1: 450, y1: 760, lines: 4 }, { x0: 550, y0: 40, x1: 950, y1: 120, lines: 2 }] }];
+  draw(s, overlayMsg(s.shown, blocks));
+  const [left, right] = s.overlay().children;
+  assert.equal(left.textContent + right.textContent, text);
+  assert.ok(left.textContent.length > right.textContent.length);
+  assert.equal(left.style.left, "47px");
+  assert.equal(right.style.left, "547px");
+});
+
+test("a box with no line count counts as one line", async (t) => {
+  const s = await ready(t);
+  draw(s, overlayMsg(s.shown, [{ kind: "paragraph", text: "一行", fg: "#000", boxes: [{ x0: 100, y0: 100, x1: 300, y1: 130 }] }]));
+  assert.equal(s.overlay().children[0].style.whiteSpace, "pre");
+});
+
+test("an overlay for another screen, or before one is known, is refused", async (t) => {
+  const s = setup(t);
+  assert.deepEqual(s.send({ type: "overlay", page: { key: "k", start: 1 }, size: { width: 1, height: 1 }, blocks: BLOCKS }).replies, [{ shown: false, reason: "畫面已經換頁，這份譯文不畫" }]);
+  await deliver(s, L, 0, 6);
+  const shown = (await show(s, L, 0)).page;
+  assert.deepEqual(s.send(overlayMsg({ ...shown, start: shown.start + 1 }, BLOCKS)).replies, [{ shown: false, reason: "畫面已經換頁，這份譯文不畫" }]);
+  assert.deepEqual(s.send(overlayMsg({ ...shown, key: "other" }, BLOCKS)).replies, [{ shown: false, reason: "畫面已經換頁，這份譯文不畫" }]);
+  assert.deepEqual(s.send({ type: "overlay", size: {}, blocks: BLOCKS }).replies, [{ shown: false, reason: "畫面已經換頁，這份譯文不畫" }]);
+  assert.equal(s.overlay(), null);
+});
+
+test("an overlay with nothing to draw is refused with a reason", async (t) => {
+  const s = await ready(t);
+  assert.deepEqual(s.send(overlayMsg(s.shown, [])).replies, [{ shown: false, reason: "這一頁沒有可以畫的譯文" }]);
+  assert.deepEqual(s.send(overlayMsg(s.shown, [{ kind: "paragraph", text: "", fg: "#000", boxes: [{ x0: 0, y0: 0, x1: 10, y1: 10, lines: 1 }] }])).replies, [{ shown: false, reason: "這一頁沒有可以畫的譯文" }]);
+});
+
+test("an overlay without a visible page image is refused", async (t) => {
+  const s = await ready(t);
+  place(s.img(), [0, 0, 0, 0]);
+  assert.deepEqual(s.send(overlayMsg(s.shown, BLOCKS)).replies, [{ shown: false, reason: "看不到書頁圖片" }]);
+});
+
+test("resizing the window moves the boxes with the page image", async (t) => {
+  const s = await ready(t);
+  draw(s, overlayMsg(s.shown, BLOCKS));
+  place(s.img(), [0, 0, 500, 400]);
+  s.page.resize(500, 400);
+  assert.equal(s.overlay().children[1].style.left, "47px");
+});
+
+test("after a page turn, resizing doesn't bring the old overlay back", async (t) => {
+  const s = await ready(t);
+  draw(s, overlayMsg(s.shown, BLOCKS));
+  await show(s, L, 1);
+  s.page.resize(800, 600);
   assert.equal(s.overlay().childElementCount, 0);
-  await settle();
-  assert.deepEqual(s.turns(), ["dom", "resize"]);
 });
 
-// ---- Frames ----
-
-test("an iframe forwards user actions to the top frame, which reports them", async (t) => {
-  const top = setup(t);
-  show(top);
-  const frame = setup(t, { top: top.page.window });
-  key(frame, "ArrowRight");
-  await waitFor(() => top.overlay().childElementCount === 0, { what: "top frame clears its overlay" });
-  await settle();
-  assert.deepEqual(top.turns(), ["key"]);
-  assert.deepEqual(frame.turns(), [], "the iframe doesn't report user actions itself");
-  // The iframe sets up no overlay, toggle or message handling of its own.
-  assert.equal(frame.chrome.runtime.onMessage.listeners.length, 0);
-  assert.equal(frame.page.$("kindle-translator-toggle"), null);
-});
-
-test("an iframe reports its own DOM churn directly", async (t) => {
-  const top = setup(t);
-  const frame = setup(t, { top: top.page.window });
-  frame.page.mutate([{ type: "childList", target: frame.page.document.body, addedNodes: [{}, {}], removedNodes: [] }]);
-  await settle();
-  assert.deepEqual(frame.turns(), ["dom"]);
-  assert.deepEqual(top.turns(), []);
-});
-
-test("the top frame accepts turn messages without a reason as 'frame'", async (t) => {
-  const s = setup(t);
-  s.page.window.postMessage({ type: "kindle-translator-turn" }, "*");
-  s.page.window.postMessage({ type: "something-else", reason: "key" }, "*");
-  await settle();
-  assert.deepEqual(s.turns(), ["frame"]);
-});
-
-// ---- Orphaned script ----
-
-test("after the extension reloads, the orphaned script does nothing", async (t) => {
-  const s = setup(t);
-  show(s);
-  s.chrome.runtime.id = undefined;
-  key(s, "ArrowRight");
-  s.page.document.body.click();
-  s.page.resize(1200, 900);
-  s.page.mutate([{ type: "childList", target: s.page.document.body, addedNodes: [{}, {}], removedNodes: [] }]);
-  await settle();
-  assert.deepEqual(s.turns(), []);
-  assert.equal(s.overlay().childElementCount, BLOCKS.length, "keeps the translation rather than leaving English");
-});
-
-// ---- Messages from the background ----
-
-test("clearOverlay replies with the turn only after the next paint", (t) => {
-  const s = setup(t);
-  show(s);
+test("clearOverlay replies only after the next paint", async (t) => {
+  const s = await ready(t);
+  draw(s, overlayMsg(s.shown, BLOCKS));
   const { ret, replies } = s.send({ type: "clearOverlay" });
   assert.equal(ret, true, "keeps the channel open");
   assert.equal(s.overlay().childElementCount, 0);
@@ -250,7 +631,7 @@ test("clearOverlay replies with the turn only after the next paint", (t) => {
   s.page.frame();
   assert.deepEqual(replies, [], "the first frame runs before the paint");
   s.page.frame();
-  assert.deepEqual(replies, [{ turn: 0 }]);
+  assert.deepEqual(replies, [{}]);
 });
 
 test("clearOverlay still replies, once, in a tab that doesn't paint", async (t) => {
@@ -260,92 +641,46 @@ test("clearOverlay still replies, once, in a tab that doesn't paint", async (t) 
   s.page.frame();
   s.page.frame();
   await sleep(600 / TIME_SCALE);
-  assert.deepEqual(replies, [{ turn: 0 }]);
+  assert.deepEqual(replies, [{}]);
 });
 
 test("overlayState says whether translated boxes are showing", async (t) => {
-  const s = setup(t);
+  const s = await ready(t);
   await waitFor(s.toggle, { what: "toggle" });
   assert.deepEqual(s.send({ type: "overlayState" }).replies, [{ shown: false }]);
-  show(s);
+  draw(s, overlayMsg(s.shown, BLOCKS));
   assert.deepEqual(s.send({ type: "overlayState" }).replies, [{ shown: true }]);
   await s.chrome.storage.sync.set({ overlay: false });
   assert.deepEqual(s.send({ type: "overlayState" }).replies, [{ shown: false }]);
 });
 
-test("an overlay with no blocks is refused with a reason", (t) => {
-  const s = setup(t);
-  assert.deepEqual(s.send({ type: "overlay", blocks: [], turn: 0 }).replies, [
-    { shown: false, reason: "Claude 沒有在這張截圖裡找到內文區塊" },
-  ]);
-  assert.equal(s.overlay(), null);
-});
-
-test("overlay boxes are placed from the block fractions", (t) => {
-  const s = setup(t);
-  const { ret, replies } = show(s, BLOCKS, 0);
-  assert.equal(ret, true);
-  assert.deepEqual(replies, [{ shown: true }]);
-  const root = s.overlay();
-  assert.equal(root.style.pointerEvents, "none", "clicks still reach the reader");
-  const [heading, a, b, single] = root.children;
-  const geom = (el) => [el.style.left, el.style.top, el.style.width, el.style.height];
-  // 1000x800 viewport, 3px padding, line height 40px (5 lines in 200px), so
-  // each box grows by up to half a line (20px) towards a neighbour and not
-  // past the first or last block.
-  assert.deepEqual(geom(heading), ["97px", "37px", "806px", "66px"]);
-  assert.deepEqual(geom(a), ["97px", "97px", "806px", "246px"]);
-  assert.deepEqual(geom(b), ["97px", "337px", "806px", "246px"]);
-  // The short single line runs to the column's right edge (900px).
-  assert.deepEqual(geom(single), ["97px", "577px", "806px", "66px"]);
-
-  assert.equal(heading.style.fontWeight, "700");
-  assert.equal(a.style.fontWeight, "400");
-  assert.equal(a.style.lineHeight, "1.5");
-  assert.equal(a.style.whiteSpace, "pre-wrap");
-  assert.equal(single.style.lineHeight, "1.2");
-  assert.equal(single.style.whiteSpace, "pre");
-  assert.equal(single.style.display, "flex");
-  assert.equal(heading.style.display, undefined, "a heading is never treated as a single line");
-  assert.deepEqual([a.style.background, a.style.color], ["#fafafa", "#111111"]);
-  assert.deepEqual([single.style.background, single.style.color], ["#eeeeee", "#222222"]);
-  assert.equal(a.textContent, BLOCKS[1].text);
-});
-
-test("blocks without a line count are judged single by height", (t) => {
-  const s = setup(t);
-  const blocks = BLOCKS.map(({ lines, ...b }) => b);
-  show(s, blocks);
-  const [heading, a, , single] = s.overlay().children;
-  // The shortest body box (40px) is taken as one line.
-  assert.equal(single.style.whiteSpace, "pre");
-  assert.equal(a.style.whiteSpace, "pre-wrap");
-  assert.equal(heading.style.whiteSpace, "pre-wrap");
-});
-
-test("body text shares one size, never larger than a box can hold", (t) => {
-  const s = setup(t);
-  const para = (y, text) => ({ kind: "paragraph", box: [0.1, y, 0.9, y + 0.15], lines: 3, text, bg: "#fff", fg: "#000" });
+test("body text shares one size, never larger than a box can hold", async (t) => {
+  const s = await ready(t);
+  const para = (y, text, lines = 3) => ({ kind: "paragraph", text, fg: "#000", boxes: [{ x0: 100, y0: y, x1: 900, y1: y + 120, lines }] });
   const blocks = [
-    { kind: "heading", box: [0.1, 0.02, 0.9, 0.08], lines: 1, text: "第二章", bg: "#fff", fg: "#000" },
-    para(0.1, "長".repeat(400)),
-    para(0.3, "中".repeat(200)),
-    para(0.5, "短".repeat(60)),
+    { kind: "heading", text: "第二章", fg: "#000", boxes: [{ x0: 100, y0: 16, x1: 900, y1: 64, lines: 1 }] },
+    para(80, "長".repeat(400)),
+    para(240, "中".repeat(200)),
+    para(400, "短".repeat(60)),
     // A single line doesn't vote, and a cut-off one-word line doesn't get huge.
-    { kind: "paragraph", box: [0.1, 0.7, 0.9, 0.75], lines: 1, text: "嗯", bg: "#fff", fg: "#000" },
+    { kind: "paragraph", text: "嗯", fg: "#000", boxes: [{ x0: 100, y0: 560, x1: 900, y1: 600, lines: 1 }] },
   ];
-  show(s, blocks);
+  draw(s, overlayMsg(s.shown, blocks));
   const boxes = s.overlay().children;
   const sizes = boxes.map((b) => parseFloat(b.style.fontSize));
   const fits = boxes.map((b) => s.page.ctx.fitText(b));
-  // Paragraph fits ascend with less text; the median (the middle one) is the page size.
   assert.ok(fits[1] < fits[2] && fits[2] < fits[3], `fits ${fits}`);
   assert.deepEqual(sizes.slice(1), [fits[1], fits[2], fits[2], fits[2]]);
   assert.ok(fits[4] > fits[2], "the single line could have been larger");
   assert.equal(sizes[0], fits[0], "headings keep their own size");
-  for (const b of boxes) {
-    assert.ok(b.scrollHeight <= b.clientHeight && b.scrollWidth <= b.clientWidth, "text fits its box");
-  }
+  for (const b of boxes) assert.ok(b.scrollHeight <= b.clientHeight && b.scrollWidth <= b.clientWidth, "text fits its box");
+});
+
+test("a page of headings only keeps each heading's own size", async (t) => {
+  const s = await ready(t);
+  draw(s, overlayMsg(s.shown, [{ kind: "heading", text: "標題", fg: "#000", boxes: [{ x0: 100, y0: 100, x1: 900, y1: 160, lines: 1 }] }]));
+  const [h] = s.overlay().children;
+  assert.equal(h.style.fontSize, `${s.page.ctx.fitText(h)}px`);
 });
 
 test("fitText finds the largest size that fits", (t) => {
@@ -362,63 +697,6 @@ test("fitText finds the largest size that fits", (t) => {
   assert.equal(s.page.ctx.fitText(box), 8);
 });
 
-// ---- Floating toggle ----
-
-test("the toggle button's label follows the setting", async (t) => {
-  const s = setup(t, { sync: { overlay: false } });
-  await waitFor(s.toggle, { what: "toggle" });
-  assert.equal(s.toggle().textContent, "顯示譯文");
-  await s.chrome.storage.sync.set({ overlay: true });
-  assert.equal(s.toggle().textContent, "顯示原文");
-  assert.equal(s.page.document.querySelectorAll("#kindle-translator-toggle").length, 1);
-});
-
-test("clicking the toggle flips the setting and is not a page turn", async (t) => {
-  const s = setup(t);
-  show(s);
-  await waitFor(s.toggle, { what: "toggle" });
-  s.toggle().click();
-  await waitFor(async () => (await s.chrome.storage.sync.get("overlay")).overlay === false, { what: "overlay off" });
-  assert.equal(s.overlay().style.display, "none");
-  assert.equal(s.toggle().textContent, "顯示譯文");
-  assert.equal(s.overlay().childElementCount, BLOCKS.length, "only hidden, so switching back is instant");
-  s.toggle().click();
-  await waitFor(async () => (await s.chrome.storage.sync.get("overlay")).overlay === true, { what: "overlay on" });
-  assert.equal(s.overlay().style.display, "");
-  await settle();
-  assert.deepEqual(s.turns(), []);
-});
-
-test("storage changes from elsewhere hide and show the overlay", async (t) => {
-  const s = setup(t);
-  show(s);
-  await waitFor(s.toggle, { what: "initial setting read" });
-  await s.chrome.storage.sync.set({ overlay: false });
-  assert.equal(s.overlay().style.display, "none");
-  // Other keys and areas are ignored.
-  await s.chrome.storage.sync.set({ autoTranslate: false });
-  await s.chrome.storage.local.set({ overlay: true });
-  assert.equal(s.overlay().style.display, "none");
-  await s.chrome.storage.sync.set({ overlay: true });
-  assert.equal(s.overlay().style.display, "");
-});
-
-test("a button left by an orphaned script is replaced", async (t) => {
-  const chrome = createChrome();
-  const page = loadPage(["content.js"], {
-    chrome,
-    html: '<html><body><button id="kindle-translator-toggle">old</button><div id="kindle-translator-overlay"><div></div></div></body></html>',
-  });
-  t.after(() => page.close());
-  await waitFor(() => page.$("kindle-translator-toggle")?.textContent === "顯示原文", { what: "new toggle" });
-  assert.equal(page.document.querySelectorAll("#kindle-translator-toggle").length, 1);
-  chrome.runtime.onMessage.dispatch({ type: "overlay", blocks: BLOCKS }, {}, () => {});
-  assert.equal(page.document.querySelectorAll("#kindle-translator-overlay").length, 1);
-  assert.equal(page.$("kindle-translator-overlay").childElementCount, BLOCKS.length);
-});
-
-// ---- Pure helpers ----
-
 test("verticalRoom: halfway to same-column neighbours, capped, none at the ends", (t) => {
   const { verticalRoom } = setup(t).page.ctx;
   const rects = [
@@ -432,7 +710,6 @@ test("verticalRoom: halfway to same-column neighbours, capped, none at the ends"
   assert.deepEqual(plain(verticalRoom(rects, 1, 5)), { above: 5, below: 2 });
   assert.deepEqual(plain(verticalRoom(rects, 2, 100)), { above: 2, below: 0 });
   assert.deepEqual(plain(verticalRoom(rects, 3, 100)), { above: 0, below: 0 });
-  // Overlapping boxes give no room rather than negative room.
   const overlap = [
     { x0: 0, y0: 0, x1: 100, y1: 20 },
     { x0: 0, y0: 20, x1: 100, y1: 40 },
@@ -443,76 +720,130 @@ test("verticalRoom: halfway to same-column neighbours, capped, none at the ends"
 test("columnRight: the right edge of the widest block in the column", (t) => {
   const { columnRight } = setup(t).page.ctx;
   const rects = [
-    { x0: 100, y0: 0, x1: 150, y1: 10 }, // short line
+    { x0: 100, y0: 0, x1: 150, y1: 10 },
     { x0: 100, y0: 20, x1: 480, y1: 60 },
     { x0: 90, y0: 70, x1: 470, y1: 90 },
-    { x0: 520, y0: 0, x1: 900, y1: 90 }, // right-hand column
+    { x0: 520, y0: 0, x1: 900, y1: 90 },
   ];
   assert.equal(columnRight(rects, 0), 480);
   assert.equal(columnRight(rects, 3), 900);
   assert.equal(columnRight([{ x0: 0, y0: 0, x1: 10, y1: 10 }], 0), 10);
 });
 
-// ---- Where the book is drawn ----
+// ---- Floating toggle ----
 
-// An element at a fixed box, as the reader places its page images.
-function place(s, tag, [left, top, width, height]) {
-  const el = s.page.document.createElement(tag);
-  Object.assign(el.style, { position: "absolute", left: `${left}px`, top: `${top}px`, width: `${width}px`, height: `${height}px` });
-  s.page.document.documentElement.append(el);
-  return el;
-}
+test("the toggle button's label follows the setting", async (t) => {
+  const s = setup(t, { sync: { overlay: false } });
+  await waitFor(s.toggle, { what: "toggle" });
+  assert.equal(s.toggle().textContent, "顯示譯文");
+  await s.chrome.storage.sync.set({ overlay: true });
+  assert.equal(s.toggle().textContent, "顯示原文");
+  assert.equal(s.page.document.querySelectorAll("#kindle-translator-toggle").length, 1);
+});
 
-test("geometry reports the book page image in CSS pixels", (t) => {
+test("clicking the toggle flips the setting and only hides the overlay", async (t) => {
+  const s = await ready(t);
+  draw(s, overlayMsg(s.shown, BLOCKS));
+  await waitFor(s.toggle, { what: "toggle" });
+  s.toggle().click();
+  await waitFor(async () => (await s.chrome.storage.sync.get("overlay")).overlay === false, { what: "overlay off" });
+  assert.equal(s.overlay().style.display, "none");
+  assert.equal(s.toggle().textContent, "顯示譯文");
+  assert.equal(s.overlay().childElementCount, BLOCKS.length, "only hidden, so switching back is instant");
+  s.toggle().click();
+  await waitFor(async () => (await s.chrome.storage.sync.get("overlay")).overlay === true, { what: "overlay on" });
+  assert.equal(s.overlay().style.display, "");
+});
+
+test("clicking the toggle of an orphaned script doesn't throw", async (t) => {
+  const s = setup(t);
+  await waitFor(s.toggle, { what: "toggle" });
+  s.chrome.storage.sync.set = () => {
+    throw new Error("Extension context invalidated.");
+  };
+  assert.doesNotThrow(() => s.toggle().click());
+});
+
+test("storage changes from elsewhere hide and show the overlay", async (t) => {
+  const s = await ready(t);
+  draw(s, overlayMsg(s.shown, BLOCKS));
+  await waitFor(s.toggle, { what: "initial setting read" });
+  await s.chrome.storage.sync.set({ overlay: false });
+  assert.equal(s.overlay().style.display, "none");
+  await s.chrome.storage.sync.set({ autoTranslate: false });
+  await s.chrome.storage.local.set({ overlay: true });
+  assert.equal(s.overlay().style.display, "none");
+  await s.chrome.storage.sync.set({ overlay: true });
+  assert.equal(s.overlay().style.display, "");
+});
+
+test("an overlay first drawn while the switch is off starts hidden", async (t) => {
+  const s = await ready(t, { sync: { overlay: false } });
+  await waitFor(() => s.toggle()?.textContent === "顯示譯文", { what: "setting read" });
+  draw(s, overlayMsg(s.shown, BLOCKS));
+  assert.equal(s.overlay().style.display, "none");
+});
+
+test("a button and overlay left by an orphaned script are replaced", async (t) => {
+  const s = setup(t, { html: READER_HTML.replace("</body>", '<button id="kindle-translator-toggle">old</button><div id="kindle-translator-overlay"><div></div></div></body>') });
+  await waitFor(() => s.toggle()?.textContent === "顯示原文", { what: "new toggle" });
+  assert.equal(s.page.document.querySelectorAll("#kindle-translator-toggle").length, 1);
+  await deliver(s, L, 0, 6);
+  const shown = (await show(s, L, 0)).page;
+  draw(s, overlayMsg(shown, BLOCKS));
+  assert.equal(s.page.document.querySelectorAll("#kindle-translator-overlay").length, 1);
+  assert.equal(s.overlay().childElementCount, BLOCKS.length);
+});
+
+// ---- Where the book is drawn (vision engine) ----
+
+test("geometry reports the page image in CSS pixels", async (t) => {
   const s = setup(t, { innerWidth: 1571, innerHeight: 974 });
-  // Kindle Cloud Reader's page image, as measured in a 1571×974 window.
-  place(s, "img", [157, 60, 1257, 824]);
-  place(s, "img", [50, 22, 18, 18]); // an icon
+  place(s.img(), [157, 60, 1257, 824]);
   const [g] = s.send({ type: "geometry" }).replies;
   assert.deepEqual(g.viewport, { width: 1571, height: 974 });
   assert.deepEqual(g.page, { left: 157, top: 60, right: 1414, bottom: 884 });
   assert.equal(typeof g.dpr, "number");
 });
 
-test("geometry covers both pages of a spread drawn as two images", (t) => {
-  const s = setup(t, { innerWidth: 1600, innerHeight: 1000 });
-  place(s, "img", [160, 60, 630, 820]);
-  place(s, "canvas", [810, 60, 630, 820]);
-  assert.deepEqual(s.send({ type: "geometry" }).replies[0].page, { left: 160, top: 60, right: 1440, bottom: 880 });
-});
-
 test("geometry rounds to whole pixels", (t) => {
-  const s = setup(t, { innerWidth: 1000, innerHeight: 800 });
-  place(s, "img", [100.4, 59.6, 800.3, 700.2]);
+  const s = setup(t);
+  place(s.img(), [100.4, 59.6, 800.3, 700.2]);
   assert.deepEqual(s.send({ type: "geometry" }).replies[0].page, { left: 100, top: 60, right: 901, bottom: 760 });
 });
 
-test("geometry ignores small and off-screen images", (t) => {
-  const s = setup(t, { innerWidth: 1000, innerHeight: 800 });
-  place(s, "img", [100, 100, 100, 600]); // too narrow
-  place(s, "img", [100, 100, 800, 100]); // too short
-  place(s, "img", [1200, 0, 800, 800]); // off screen (the next page, preloaded)
-  assert.equal(s.send({ type: "geometry" }).replies[0].page, null);
+test("without the reader's page image, geometry takes the large images on screen", (t) => {
+  const s = setup(t, { html: "<html><body></body></html>", innerWidth: 1600, innerHeight: 1000 });
+  const add = (tag, rect) => {
+    const el = s.page.document.createElement(tag);
+    place(el, rect);
+    s.page.document.body.append(el);
+  };
+  add("img", [160, 60, 630, 820]);
+  add("canvas", [810, 60, 630, 820]);
+  add("img", [50, 22, 18, 18]); // an icon
+  add("img", [1700, 0, 800, 800]); // off screen
+  assert.deepEqual(s.send({ type: "geometry" }).replies[0].page, { left: 160, top: 60, right: 1440, bottom: 880 });
 });
 
 test("geometry is null without page images", (t) => {
-  const s = setup(t);
+  const s = setup(t, { html: "<html><body></body></html>" });
   const [g] = s.send({ type: "geometry" }).replies;
   assert.equal(g.page, null);
   assert.deepEqual(g.viewport, { width: 1000, height: 800 });
 });
 
-// ---- Test screenshots (options page → 開發者) ----
+// ---- Page data for a test tool (options page → 開發者) ----
 
-test("a test tool's capture request is relayed and the result posted back", async (t) => {
+test("a test tool's request is relayed and the result posted back", async (t) => {
   const s = setup(t);
-  s.chrome._.runtimeMessageHandler = (msg) => (msg.type === "devCapture" ? { ok: true, filename: `${msg.name}.jpg`, bytes: 1234 } : undefined);
+  s.chrome._.runtimeMessageHandler = (msg) => (msg.type === "devCapture" ? { ok: true, filename: `${msg.name}.json` } : undefined);
   const results = [];
   s.page.window.addEventListener("message", (e) => e.data?.type === "kindle-translator-dev-capture-result" && results.push(plain(e.data)));
   s.page.window.postMessage({ type: "kindle-translator-dev-capture", id: 7, name: "alice-p1" }, "*");
   await waitFor(() => results.length);
-  assert.deepEqual(plain(s.chrome._.runtimeMessages.filter((m) => m.type === "devCapture")), [{ type: "devCapture", name: "alice-p1" }]);
-  assert.deepEqual(results, [{ type: "kindle-translator-dev-capture-result", id: 7, ok: true, filename: "alice-p1.jpg", bytes: 1234 }]);
+  assert.deepEqual(plain(s.sent("devCapture")), [{ type: "devCapture", name: "alice-p1" }]);
+  assert.deepEqual(results, [{ type: "kindle-translator-dev-capture-result", id: 7, ok: true, filename: "alice-p1.json" }]);
 });
 
 test("a failed relay is reported back, not thrown", async (t) => {
@@ -528,10 +859,9 @@ test("a failed relay is reported back, not thrown", async (t) => {
   assert.match(results[0].error, /Extension context invalidated/);
 });
 
-test("capture requests from another window are ignored", async (t) => {
+test("requests from another window are ignored", async (t) => {
   const s = setup(t);
-  // e.g. an ad iframe posting to the reader.
   s.page.fire(s.page.window, "message", { data: { type: "kindle-translator-dev-capture", id: 1 }, source: {} });
   await sleep(10);
-  assert.equal(s.chrome._.runtimeMessages.filter((m) => m.type === "devCapture").length, 0);
+  assert.equal(s.sent("devCapture").length, 0);
 });

@@ -2,30 +2,23 @@
 
 # Kindle 自動翻譯（Chrome extension）
 
-截取 Kindle Cloud Reader（read.amazon.com 等）目前顯示的頁面，用本機 OCR（Tesseract）辨識文字、DocLayout-YOLO 版面模型找出段落與圖表位置，再交給 Claude Haiku 翻譯、Sonnet 校對成繁體中文。譯文直接蓋在書頁原文的位置上，也同時顯示在 Chrome 側邊欄。
+讀取 Kindle Cloud Reader（read.amazon.com 等）自己的頁面資料，知道畫面上是哪一頁、哪些字是同一段，用本機 OCR（Tesseract）辨識文字，再交給 Claude Haiku 翻譯、Sonnet 校對成繁體中文。譯文直接蓋在書頁原文的位置上，也同時顯示在 Chrome 側邊欄。讀目前這一頁時，下一頁會先翻好，翻過去就直接出現。
 
 ![範例：《Build a Reasoning Model (From Scratch)》雙頁版面，內文和圖說的譯文蓋在原文位置上，圖 1.1、1.2 保留原圖，右側是側邊欄](docs/example.png)
 
-> 在 Kindle Cloud Reader 的雙頁版面上實測，翻頁後約 10 秒譯文就會蓋上原文。覆蓋層沒出現時，側邊欄狀態列會用紅字顯示原因，底下的執行紀錄可以看到每一步。
+> 照順序往後讀時，第二頁起翻頁就直接看到譯文；第一頁、跳頁或往回翻到沒翻過的頁，要等 10～15 秒。覆蓋層沒出現時，側邊欄狀態列會用紅字顯示原因，底下的執行紀錄可以看到每一步。
 
-## 用視覺模型偵測排版
+## 用閱讀器自己的頁面資料
 
-Kindle Cloud Reader 的書頁是圖片，沒有可以讀的文字和排版資訊，所以擴充功能看的是截圖。光靠 OCR 只知道每一行字在哪裡，分不出哪些行是同一段、哪個是標題，也分不出哪些字其實是圖裡的標籤。
+Kindle Cloud Reader 把書頁畫成圖片，但畫之前，它先向 Amazon 拿了一份頁面資料：每一行字的位置、字型、顏色、屬於哪一段，插圖在哪裡，以及字形的輪廓。2.0 起，擴充功能旁聽這份資料（不另外向 Amazon 要任何東西），用它來做三件事：
 
-因此 1.0 起，擴充功能會在瀏覽器裡跑一個視覺模型 [DocLayout-YOLO](https://github.com/opendatalab/DocLayout-YOLO) 來偵測排版（layout）。它是專門看文件版面的物件偵測模型，會在書頁上框出這些區塊：
+- **知道畫面上是哪一頁**：照資料把候選的頁畫出來，跟閱讀器顯示的圖逐像素比對，插圖以外完全一樣的就是這一頁。工具列、游標、彈出的選單都不會被誤認成翻頁。
+- **知道哪些字是同一段、哪個是標題、哪裡是插圖**：直接來自書本身的排版，不用猜。插圖裡的字不翻譯，原圖照樣露出來。
+- **給 OCR 一張乾淨的頁面**：沒有工具列、游標和譯文殘影。字形在資料裡只有編號、沒有文字，所以內容還是要由 Tesseract 辨識。
 
-- 段落、標題、頁首頁尾
-- 圖、圖說
-- 表、表說明、表註
-- 公式、公式說明
+譯文以段落為單位存起來，用的是該段在書中的位置，跟字級、視窗大小無關：改了字級或視窗大小，讀過的段落不用重翻。
 
-擴充功能再把 OCR 讀到的每一行放進對應的區塊：
-
-- 同一個區塊的行合成一段，所以分段、標題的判斷跟書的排版一致。
-- 圖、表、公式裡的字不翻譯，原圖會露出來，不會被一堆翻譯過的標籤蓋住。
-- 圖說、標題各自成框，字級和位置不會跟內文混在一起。
-
-模型用 [ONNX Runtime Web](https://github.com/microsoft/onnxruntime) 在本機 GPU 上執行（WebGPU），雙頁約 0.25 秒，截圖不會離開電腦。模型檔 75 MB，第一次翻譯時從 Hugging Face 下載，之後存在瀏覽器裡。這個做法參考了 PDF 翻譯工具 [BabelDOC](https://github.com/funstory-ai/BabelDOC)。
+1.x 用截圖、粗略的畫面指紋和 DocLayout-YOLO 版面模型（WebGPU，75 MB）做這些事，2.0 全部換掉了，也不再需要 WebGPU 和下載模型。
 
 ## 安裝
 
@@ -39,30 +32,37 @@ Kindle Cloud Reader 的書頁是圖片，沒有可以讀的文字和排版資訊
 
 1. 打開 Kindle Cloud Reader 並開啟一本書。
 2. 點工具列上的擴充功能圖示，打開側邊欄。
-3. 按「翻譯這一頁」，或按 Alt+T。勾選「翻頁自動翻譯」時，翻頁後約 1 秒會自動翻譯。目前這一頁已經翻好、畫面也沒變時，按鈕會變成「重新翻譯本頁」，按下去會略過快取重新請求。
-4. 譯文會蓋在書頁原本的段落上（字級自動縮放、底色配合閱讀器主題）。側邊欄上方的「書頁顯示：譯文｜原文」切換鈕，或書頁右下角的「顯示原文／顯示譯文」小按鈕，或按 Alt+O，都可以隨時切換，切回譯文時會立刻顯示，不用重新翻譯。翻頁或點擊頁面時覆蓋層會先清掉，等新的一頁翻好再出現。
+3. 按「翻譯這一頁」，或按 Alt+T。勾選「翻頁自動翻譯」時，翻到沒翻過的頁、停留約 1 秒就會自動翻譯；翻過的頁直接顯示。目前這一頁的譯文已經畫上時，按鈕會變成「重新翻譯本頁」，按下去會略過快取重新請求。
+4. 譯文會蓋在書頁原本的段落上（字級自動縮放、底色配合閱讀器主題）。側邊欄上方的「書頁顯示：譯文｜原文」切換鈕，或書頁右下角的「顯示原文／顯示譯文」小按鈕，或按 Alt+O，都可以隨時切換，切回譯文時會立刻顯示，不用重新翻譯。翻頁時覆蓋層會先清掉，等新的一頁翻好再出現。
 5. 側邊欄最上方是最新一頁的譯文，可以按「複製」。
 
 ## 運作方式與注意事項
 
 - 只有側邊欄開著時才會自動翻譯，避免背景偷偷花費 API 額度。
-- 頁面以「內文區域」的粗略指紋辨識（不含標題列、進度列、翻頁箭頭；縮小成黑白點陣，大致相同就算同一頁，所以工具列、滑鼠效果不會被當成換頁），同一頁不會重複送出；翻回已翻過的頁面會用快取（關掉瀏覽器後清除）。翻頁後停約 1.2 秒才會開始翻譯，快速連續翻頁時中間的頁面不會送出。翻譯途中換頁的話，那一頁會在背景翻完並存進快取（最多同時一頁，再多就取消最早的），同時馬上開始翻新的一頁；翻回還在背景翻譯的頁面時會等它完成，不會重送。
+- 打開書之後才載入擴充功能（或重新載入擴充功能）的分頁，要等閱讀器拿下一批頁面資料才認得出目前是哪一頁；側邊欄會提示，重新整理 Kindle 分頁最快。
+- 翻頁後停約 1.2 秒才會送出翻譯，快速連續翻頁時中間的頁面不會送出。翻譯途中換頁的話，那一頁會在背景翻完並存進快取（最多同時一頁，再多就取消最早的），同時開始翻新的一頁；翻回還在翻的頁時會等它完成，不會重送。快取在關掉瀏覽器時清除。
+- **預先翻譯下一頁**（設定頁，預設開啟）：目前這一頁的譯文畫上、停留約 2 秒後，就先把下一頁翻好。照順序往後讀時不會多花；停止閱讀、跳頁或往回翻時，預先翻好但沒讀到的頁照樣計費。只用於翻譯方式 1、2。
 - 設定頁的「翻譯方式」有三種：
-  - **1. 快速**：Tesseract.js 在瀏覽器裡辨識文字和位置（雙頁會先找出中間的空白分成兩欄），同時用 DocLayout-YOLO 版面模型在 GPU 上（WebGPU）找出段落、標題、圖說、圖、表的位置：圖、表、公式裡的文字保留原文，其他依模型的區塊合併成段落，只把文字送給 Claude Haiku 5.5 翻譯；雙頁時左右兩欄同時送出。一頁約 9 秒（OCR 約 3 秒），每頁約 0.1 美分，截圖不會離開電腦。目前只載入英文辨識模型。
-  - **2. 精修（預設）**：同 1，Haiku 翻完後再由 Sonnet 5.5 校對，Sonnet 只回傳需要修改的段落，修改內容會列在側邊欄的執行紀錄裡。實測每欄校對 2～3 秒，整頁約 10 秒，每頁約 1 美分。
-  - 1、2 偶爾會有某一欄被以版權為由拒絕翻譯，那一欄會自動改用 Opus 5.5 翻譯文字（不再校對），整頁約 15 秒。
-  - **3. 看圖**：截圖直接送給 Claude Opus 5.5，由它找段落位置並翻譯，可以處理非英文書。每頁 20 秒以上，effort 預設 low。實測 Sonnet 5.5、Haiku 5.5 看書頁截圖會以版權為由拒絕，所以這個模式只用 Opus。Opus 5.5 被安全分類器擋下時，會依序改用 Opus 5、Opus 4.8 重試。
-- 翻譯只會連到 api.anthropic.com；另外第一次翻譯時會從 Hugging Face 下載版面模型（見下面）。API key 存在 Chrome 同步儲存區。
-- Opus 模式的截圖會先縮到長邊 2576px 且總像素 3.7MP 以內再送出，超過的話 API 會再縮一次，座標就對不上。
+  - **1. 快速**：Tesseract.js 在瀏覽器裡辨識每一欄的文字，依閱讀器的頁面資料分成段落，只把文字送給 Claude Haiku 5.5 翻譯；雙頁時左右兩欄同時送出。每頁約 0.1 美分，書頁圖片不會離開電腦。目前只載入英文辨識模型。
+  - **2. 精修（預設）**：同 1，Haiku 翻完後再由 Sonnet 5.5 校對，Sonnet 只回傳需要修改的段落，修改內容會列在側邊欄的執行紀錄裡。每頁約 1 美分。
+  - 1、2 偶爾會有某一欄被以版權為由拒絕翻譯，那一欄會自動改用 Opus 5.5 翻譯文字（不再校對）。
+  - **3. 看圖**：截圖直接送給 Claude Opus 5.5，由它找段落位置並翻譯，可以處理非英文書。每頁 20 秒以上，effort 預設 low，不預先翻譯下一頁。實測 Sonnet 5.5、Haiku 5.5 看書頁截圖會以版權為由拒絕，所以這個模式只用 Opus。Opus 5.5 被安全分類器擋下時，會依序改用 Opus 5、Opus 4.8 重試。截圖會先縮到長邊 2576px 且總像素 3.7MP 以內再送出，超過的話 API 會再縮一次，座標就對不上。
+- 只會連到 api.anthropic.com。API key 存在 Chrome 同步儲存區。閱讀器的頁面資料只在頁面裡用來辨識和畫出這一頁、下一頁，不會送出去。
 - Claude 偶爾會以版權為由只給摘要。偵測到摘要會自動重新請求一次；仍是摘要就照樣顯示並標示「摘要」，但不存快取。
-- 位置以段落為單位，不是逐行對齊；框偶爾會偏一點。OCR 模式的段落以 DocLayout-YOLO 的區塊為準，模型沒框到的行（例如被頁緣切到的一行）才依縮排、行距和短行切分。
-- DocLayout-YOLO 模型檔 75 MB，第一次翻譯時從 Hugging Face 下載並校驗，存在瀏覽器裡，之後不再下載；第一頁會等下載完成，側邊欄會顯示進度。需要 WebGPU；模型無法使用時不會改用別的方式，而是在側邊欄顯示紅字錯誤，這頁不翻譯。
+- 位置以段落為單位，不是逐行對齊；一段從左頁接到右頁時，譯文依行數分成兩塊。
 - 譯文方框會蓋住書頁上的螢光標記，也看不到底下的原文。要畫新的標記時，先切到「原文」（右下角按鈕或 Alt+O），選取文字畫好標記，再切回「譯文」。
-- 書頁文字太小時辨識會變差，可以把閱讀器字體調大或視窗放大。
-- 這是逐頁截圖翻譯給自己閱讀用，不要拿來大量匯出書本內容，那會違反 Amazon 使用條款。
+- 依賴 Kindle Cloud Reader 沒有公開的頁面資料格式；Amazon 改了格式，擴充功能就會認不出頁面，側邊欄會顯示原因。
+- 這是逐頁翻譯給自己閱讀用，不要拿來大量匯出書本內容，那會違反 Amazon 使用條款。
 
 ## 版本紀錄
 
+- **2.0.0**：改用閱讀器自己的頁面資料，並預先翻譯下一頁。
+  - 旁聽閱讀器拿的頁面資料，照它把頁面畫出來，跟畫面逐像素比對，精確知道目前是哪一頁；不再截圖比指紋，工具列、游標不會再被當成翻頁。
+  - 段落、標題、插圖直接來自頁面資料，拿掉 DocLayout-YOLO 版面模型：不再需要 WebGPU，也不用下載 75 MB 的模型。
+  - OCR 讀的是照資料畫出的乾淨頁面；譯文方框照原文的實際位置擺放，底色和字色來自閱讀器的主題。
+  - 譯文以段落為單位快取，改字級、視窗大小或翻回來都不用重翻讀過的段落；翻譯途中換頁的結果也不浪費。
+  - 新增「預先翻譯下一頁」（預設開啟）。
+  - 側邊欄的「存下截圖」改成「存下頁面資料」（除錯用）。
 - **1.1.0**：OCR 只讀 Kindle 畫書頁的範圍。
   - 位置由頁面回報，不再用固定比例。以前高的視窗會切掉章名和第一行，矮的視窗又會讀進標題列；現在不論視窗大小、縮放比例、螢幕解析度都一樣準。
   - 判斷「同一頁」也改看同一個範圍，工具列滑進滑出不再被當成翻頁。
@@ -101,22 +101,20 @@ Kindle Cloud Reader 的書頁是圖片，沒有可以讀的文字和排版資訊
 詳細設計見 [docs/design.md](docs/design.md)。
 
 - `manifest.json`：Manifest V3 設定
-- `content.js`：在 Kindle 頁面偵測翻頁（按鍵、點擊、DOM 變化），並畫出譯文覆蓋層
-- `background.js`：截圖、OCR 前處理、呼叫 Claude API（結構化輸出）、取樣顏色、快取
-- `ocr-layout.js`：分欄偵測、把 OCR 的行合併成段落
-- `page-sig.js`：頁面指紋與「是否同一頁」的比對
-- `offscreen.html/js`：在 offscreen 文件裡執行 Tesseract 和 DocLayout-YOLO（service worker 不能開 Web Worker）
-- `layout-model.js`：下載、快取、在 WebGPU 上執行 DocLayout-YOLO
+- `page-hook.js`：在 Kindle 頁面自己的環境裡包住 `fetch`，把閱讀器拿的頁面資料複製給 content script
+- `page-render.js`：解開頁面資料、照它畫出頁面、逐像素比對、找出段落和欄
+- `content.js`：在 Kindle 頁面保留頁面資料、辨識目前是哪一頁，並畫出譯文覆蓋層
+- `background.js`：決定翻哪一頁、呼叫 Claude API（結構化輸出）、段落快取、預讀下一頁、看圖模式的截圖
+- `ocr-layout.js`：把 OCR 讀到的行放進段落
+- `offscreen.html/js`：在 offscreen 文件裡執行 Tesseract（service worker 不能開 Web Worker）
 - `sidepanel.html/js`：側邊欄介面
-- `options.html/js`：設定頁（API key、翻譯方式、effort、目標語言）
+- `options.html/js`：設定頁（API key、翻譯方式、預先翻譯下一頁、effort、目標語言）
 - `vendor/tesseract/`：Tesseract.js 7.0.0、tesseract.js-core 和英文模型（Apache-2.0），全部打包在擴充功能裡，不從 CDN 載入
-- `vendor/onnxruntime/`：ONNX Runtime Web 1.30.0 的 WebGPU 版本（MIT）
-- `vendor/doclayout/`：DocLayout-YOLO 模型的來源、校驗碼與授權（Apache-2.0）；模型本身不在 repo 裡
 - `tests/`：Node 測試（見下一節）
 
 ## 開發
 
-測試用 Node 內建的 test runner，需要 Node 22 以上。唯一的套件是解 JPEG 的 `jpeg-js`，第一次先在 repo 根目錄執行 `npm install`。之後：
+測試用 Node 內建的 test runner，需要 Node 22 以上，沒有任何套件：
 
 ```bash
 npm test                                                  # 全部
@@ -125,14 +123,11 @@ node --test --test-name-pattern="cache" "tests/**/*.test.js"  # 名稱符合的�
 node --test --watch "tests/**/*.test.js"                  # 改程式時自動重跑
 ```
 
-測試把擴充功能的檔案原封不動地載入，周圍的 Chrome API、截圖、OCR、Claude API 和 DOM 都換成假的，所以不需要瀏覽器、API key 或網路，跑一次約 15 秒。`tests/fixtures/` 裡有幾張沒有版權的書的真實截圖（用側邊欄執行紀錄的「存下截圖」存下），用來測頁面指紋、裁切、分欄和顏色。Tesseract 和版面模型的實際輸出不在測試範圍內，要用真實截圖確認。測試的架構見 [docs/design.md](docs/design.md) 第 9 節。
-
-批次製作測試截圖的方法見 [docs/design.md](docs/design.md) 第 9 節。
+測試把擴充功能的檔案原封不動地載入，周圍的 Chrome API、Kindle 頁面、OCR、Claude API 和 DOM 都換成假的，所以不需要瀏覽器、API key 或網路，跑一次約 20 秒。Kindle 的頁面資料用一本合成的書代替（Amazon 的字型不能放進 repo），canvas 是真的會填像素的假 canvas，所以辨識頁面的逐像素比對也測得到。Tesseract 的實際輸出和閱讀器真正的畫法不在測試範圍內，要在實際的 Kindle Cloud Reader 上確認。測試的架構見 [docs/design.md](docs/design.md) 第 11 節。
 
 改動擴充功能後，到 `chrome://extensions` 按擴充功能的重新載入，再重新整理 Kindle 分頁。
 
 ## 致謝
 
-- [DocLayout-YOLO](https://github.com/opendatalab/DocLayout-YOLO)（OpenDataLab）：版面偵測模型。使用 [wybxc/DocLayout-YOLO-DocStructBench-onnx](https://huggingface.co/wybxc/DocLayout-YOLO-DocStructBench-onnx) 的 ONNX 版本（Apache-2.0）。
-- [BabelDOC](https://github.com/funstory-ai/BabelDOC)：模型的選擇、前處理與類別定義參考它的做法。
-- [ONNX Runtime Web](https://github.com/microsoft/onnxruntime)（MIT）與 [Tesseract.js](https://github.com/naptha/tesseract.js)（Apache-2.0）。
+- [Tesseract.js](https://github.com/naptha/tesseract.js)（Apache-2.0）。
+- 1.x 的版面偵測用了 [DocLayout-YOLO](https://github.com/opendatalab/DocLayout-YOLO)（OpenDataLab）、[ONNX Runtime Web](https://github.com/microsoft/onnxruntime)（MIT），做法參考 [BabelDOC](https://github.com/funstory-ai/BabelDOC)。

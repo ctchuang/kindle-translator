@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "Kindle 自動翻譯",
-  "version": "1.1.0",
-  "description": "截取 Kindle Cloud Reader 目前頁面，用 OCR 辨識文字、Claude 翻譯成繁體中文，譯文蓋回書頁原位，也顯示在側邊欄。",
+  "version": "2.0.0",
+  "description": "讀取 Kindle Cloud Reader 自己的頁面資料，用 OCR 辨識文字、Claude 翻譯成繁體中文，譯文蓋回書頁原位，也顯示在側邊欄。",
   "permissions": [
     "sidePanel",
     "storage",
@@ -35,10 +35,25 @@
         "https://read.amazon.com.au/*"
       ],
       "js": [
+        "page-hook.js"
+      ],
+      "run_at": "document_start",
+      "world": "MAIN"
+    },
+    {
+      "matches": [
+        "https://read.amazon.com/*",
+        "https://read.amazon.co.jp/*",
+        "https://read.amazon.co.uk/*",
+        "https://read.amazon.de/*",
+        "https://read.amazon.ca/*",
+        "https://read.amazon.com.au/*"
+      ],
+      "js": [
+        "page-render.js",
         "content.js"
       ],
-      "run_at": "document_idle",
-      "all_frames": true
+      "run_at": "document_start"
     }
   ],
   "side_panel": {

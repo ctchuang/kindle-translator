@@ -134,11 +134,10 @@ test("pageState switches the button label and the overlay hint", (t) => {
   assert.equal(s.$("overlayHint").hidden, false);
 });
 
-test("layoutState shows the model's state", (t) => {
+test("there's no layout model status line any more", (t) => {
   const s = setup(t);
-  s.post({ type: "layoutState", text: "DocLayout-YOLO：已載入（WebGPU）", level: "ok" });
-  assert.equal(s.$("layoutState").textContent, "DocLayout-YOLO：已載入（WebGPU）");
-  assert.equal(s.$("layoutState").className, "ok");
+  assert.equal(s.$("layoutState"), null);
+  s.post({ type: "layoutState", text: "x", level: "ok" }); // an old worker's message is harmless
 });
 
 // ---- Pages ----
@@ -260,16 +259,17 @@ test("a dropped port mid-translation says the request was lost", async (t) => {
   await new Promise((r) => setTimeout(r, 1000 / TIME_SCALE));
 });
 
-// ---- Screenshot for tests ----
+// ---- Page data for debugging ----
 
-test("the screenshot link asks the worker for a capture", (t) => {
+test("the page-data link asks the worker for the screen's data", (t) => {
   const s = setup(t);
+  assert.equal(s.$("saveShot").textContent, "存下頁面資料");
   const ok = s.page.fire(s.$("saveShot"), "click", { cancelable: true });
   assert.equal(ok, false, "doesn't toggle the <details>");
   assert.deepEqual(s.received, [{ type: "captureNow" }]);
 });
 
-test("a screenshot from the worker is saved as a download, with its geometry", (t) => {
+test("page data from the worker is saved as a JSON download", async (t) => {
   const s = setup(t);
   const clicked = [];
   const create = s.page.document.createElement.bind(s.page.document);
@@ -278,12 +278,10 @@ test("a screenshot from the worker is saved as a download, with its geometry", (
     if (tag === "a") el.click = () => clicked.push({ href: el.href, download: el.download });
     return el;
   };
-  const info = { asin: "B0X", viewport: { width: 1571, height: 974 }, dpr: 3, page: { left: 157, top: 60, right: 1414, bottom: 884 } };
-  s.post({ type: "screenshot", dataUrl: "data:image/jpeg;base64,AAAA", filename: "kindle-B0X-20261026-101500.jpg", info });
-  assert.equal(clicked.length, 2);
-  assert.deepEqual(clicked[0], { href: "data:image/jpeg;base64,AAAA", download: "kindle-B0X-20261026-101500.jpg" });
-  // Its geometry beside it, for the OCR crop in tests.
-  assert.equal(clicked[1].download, "kindle-B0X-20261026-101500.json");
-  const json = decodeURIComponent(clicked[1].href.slice(clicked[1].href.indexOf(",") + 1));
-  assert.deepEqual(JSON.parse(json), info);
+  const json = JSON.stringify({ params: { asin: "B0X" }, page: { startPositionId: 5 } });
+  s.post({ type: "savePage", filename: "kindle-B0X-5.json", json });
+  assert.equal(clicked.length, 1);
+  assert.equal(clicked[0].download, "kindle-B0X-5.json");
+  assert.match(clicked[0].href, /^blob:/);
+  assert.equal(await require("node:buffer").resolveObjectURL(clicked[0].href).text(), json);
 });

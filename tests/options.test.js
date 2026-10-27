@@ -28,6 +28,7 @@ test("loads the defaults into the fields", async (t) => {
   assert.equal(s.$("targetLang").value, "繁體中文（台灣用語）");
   assert.equal(s.$("mode").value, "review");
   assert.equal(s.$("effortRow").hidden, true);
+  assert.equal(s.$("prefetch").checked, true, "prefetching is on by default");
 });
 
 test("loads stored fields and maps engine and quality to the mode", async (t) => {
@@ -74,8 +75,26 @@ test("saving an OCR mode writes trimmed fields, engine and quality, and drops le
     targetLang: "繁體中文（香港用語）",
     engine: "ocr",
     quality: "haiku",
+    prefetch: true,
     overlay: false, // other settings are left alone
   });
+});
+
+test("the prefetch checkbox shows and saves the setting", async (t) => {
+  const s = await setup(t, { prefetch: false });
+  assert.equal(s.$("prefetch").checked, false);
+  s.$("prefetch").checked = true;
+  await save(s);
+  assert.equal(s.stored().prefetch, true);
+  s.$("prefetch").checked = false;
+  await save(s);
+  assert.equal(s.stored().prefetch, false);
+});
+
+test("the options page no longer mentions the layout model or WebGPU", () => {
+  const html = require("node:fs").readFileSync(require("node:path").join(__dirname, "..", "options.html"), "utf8");
+  assert.doesNotMatch(html, /DocLayout|WebGPU/);
+  assert.match(html, /receive-pages\.js/);
 });
 
 test("saving vision keeps the stored quality level for later", async (t) => {

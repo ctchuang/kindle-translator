@@ -22,9 +22,6 @@
     .seg button[aria-checked="true"] { background:var(--accent); color:#fff; }
     #overlayHint { width:100%; margin-top:-4px; color:var(--muted); font-size:12px; }
     #overlayHint[hidden] { display:none; }
-    #layoutState { width:100%; font-size:12px; color:var(--muted); }
-    #layoutState.ok { color:var(--accent); }
-    #layoutState.err { color:var(--err); }
     #status { width:100%; color:var(--muted); font-size:12px; min-height:1em; white-space:pre-wrap; }
     #status.err { color:var(--err); }
     /* While translating: a tinted pill with a pulsing dot, so it's visible at a glance. */
@@ -55,7 +52,6 @@
       <button role="radio" data-on="false">原文</button>
     </div>
     <div id="overlayHint">本頁尚未翻譯，翻好後選「譯文」才會蓋上去</div>
-    <div id="layoutState" title="判斷段落、標題、圖、表位置的 DocLayout-YOLO 模型；Tesseract 只負責讀出文字">DocLayout-YOLO：翻譯第一頁時載入</div>
     <button class="ghost" id="clear">清空</button>
     <button class="ghost" id="options">設定</button>
     <div id="status"></div>
@@ -65,7 +61,7 @@
   </main>
   <footer>
     <details open>
-      <summary><span>執行紀錄</span><span><a id="saveShot" title="用翻譯時的同一種方式截下目前畫面（不含譯文），存成 JPEG，給測試用">存下截圖</a> · <a id="clearLog">清除</a></span></summary>
+      <summary><span>執行紀錄</span><span><a id="saveShot" title="存下閱讀器目前這一頁的頁面資料（JSON），給除錯用；裡面有書的字型輪廓，只留在這台電腦">存下頁面資料</a> · <a id="clearLog">清除</a></span></summary>
       <div id="log"></div>
     </details>
   </footer>
