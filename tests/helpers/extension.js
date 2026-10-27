@@ -140,7 +140,7 @@ function startExtension({ settings = {}, session = {}, panel = true, book = test
           if (r) return r;
         }
         const now = screenInfo(tab.layout, screen());
-        if (msg.page?.key !== now.key || msg.page?.start !== now.start) return { shown: false, reason: "畫面已經換頁，這份譯文不畫" };
+        if (msg.page?.key !== now.key || msg.page?.start !== now.start) return { shown: false, stale: true, reason: "畫面已經換頁，這份譯文不畫" };
         if (!msg.blocks.length) return { shown: false, reason: "這一頁沒有可以畫的譯文" };
         tab.overlay = msg;
         return { shown: true };

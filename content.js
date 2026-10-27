@@ -41,6 +41,8 @@ function addBatch(url, buf) {
     pageLog(`閱讀器的頁面資料看不懂：${err.message}`);
     return;
   }
+  // Asking for pages before the book's start comes back empty.
+  if (!batch.pages.length) return;
   const layout = layouts.get(batch.key) ?? { key: batch.key, params: batch.params, pages: new Map() };
   layouts.delete(batch.key); // re-added last: newest layout last
   layouts.set(batch.key, layout);
@@ -144,7 +146,8 @@ async function findScreen(img) {
     const candidates = [...layout.pages.values()].sort((a, b) => distance(a) - distance(b));
     const hit = identifyScreen(shot, candidates, (p) => pixelsOf(layout, p, scale), scale);
     if (hit) return { layout, page: hit.page, tried: tried + hit.tried, ms: Math.round(performance.now() - started) };
-    tried += candidates.length;
+    // Only those of the image's size were drawn and compared.
+    tried += candidates.filter((p) => Math.round(p.width * scale) === shot.width && Math.round(p.height * scale) === shot.height).length;
   }
   return null;
 }
@@ -560,7 +563,7 @@ if (window.top === window) {
         return;
       case "overlay": {
         if (!shown || shown.key !== msg.page?.key || shown.start !== msg.page?.start) {
-          sendResponse({ shown: false, reason: "畫面已經換頁，這份譯文不畫" });
+          sendResponse({ shown: false, stale: true, reason: "畫面已經換頁，這份譯文不畫" });
           return;
         }
         const problem = drawOverlay(msg);

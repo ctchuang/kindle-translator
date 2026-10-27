@@ -176,6 +176,15 @@ test("messages that aren't the hook's copy are ignored", async (t) => {
   assert.equal(s.sent("pageLog").length, 0);
 });
 
+test("an empty batch (pages asked for before the book's start) is ignored", async (t) => {
+  const s = setup(t);
+  const { makeTar } = require("./helpers/kindle");
+  const buf = makeTar({ "page_data_0_0.json": "[]", "glyphs.json": "[]" });
+  await deliver(s, L, 0, 6, { buf: buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength) });
+  assert.equal(s.page.ctx.run("layouts").size, 0);
+  assert.equal(s.sent("pageLog").length, 0);
+});
+
 test("data it can't read is logged, not kept", async (t) => {
   const s = setup(t);
   await deliver(s, L, 0, 6, { buf: new Uint8Array([1, 2, 3]).buffer });
@@ -266,6 +275,16 @@ test("every screen of the batch is told apart, including an illustration alone",
   for (const i of [0, 1, only, only + 1, 3]) {
     assert.equal((await show(s, one, i)).page.start, one.screens[i].startPositionId, `screen ${i}`);
   }
+});
+
+test("the count of screens compared leaves out those of another size", async (t) => {
+  const s = setup(t);
+  const wide = book.layout({ width: 320 });
+  await deliver(s, L, 0, 6);
+  await deliver(s, wide, 0, 6); // newest layout, tried first, but no screen of this size
+  const msg = await show(s, L, 1);
+  assert.equal(msg.page.key, L.key);
+  assert.ok(msg.tried <= 6, `tried ${msg.tried}`);
 });
 
 test("candidates nearest the previous screen are tried first", async (t) => {
@@ -584,12 +603,12 @@ test("a box with no line count counts as one line", async (t) => {
 
 test("an overlay for another screen, or before one is known, is refused", async (t) => {
   const s = setup(t);
-  assert.deepEqual(s.send({ type: "overlay", page: { key: "k", start: 1 }, size: { width: 1, height: 1 }, blocks: BLOCKS }).replies, [{ shown: false, reason: "畫面已經換頁，這份譯文不畫" }]);
+  assert.deepEqual(s.send({ type: "overlay", page: { key: "k", start: 1 }, size: { width: 1, height: 1 }, blocks: BLOCKS }).replies, [{ shown: false, stale: true, reason: "畫面已經換頁，這份譯文不畫" }]);
   await deliver(s, L, 0, 6);
   const shown = (await show(s, L, 0)).page;
-  assert.deepEqual(s.send(overlayMsg({ ...shown, start: shown.start + 1 }, BLOCKS)).replies, [{ shown: false, reason: "畫面已經換頁，這份譯文不畫" }]);
-  assert.deepEqual(s.send(overlayMsg({ ...shown, key: "other" }, BLOCKS)).replies, [{ shown: false, reason: "畫面已經換頁，這份譯文不畫" }]);
-  assert.deepEqual(s.send({ type: "overlay", size: {}, blocks: BLOCKS }).replies, [{ shown: false, reason: "畫面已經換頁，這份譯文不畫" }]);
+  assert.deepEqual(s.send(overlayMsg({ ...shown, start: shown.start + 1 }, BLOCKS)).replies, [{ shown: false, stale: true, reason: "畫面已經換頁，這份譯文不畫" }]);
+  assert.deepEqual(s.send(overlayMsg({ ...shown, key: "other" }, BLOCKS)).replies, [{ shown: false, stale: true, reason: "畫面已經換頁，這份譯文不畫" }]);
+  assert.deepEqual(s.send({ type: "overlay", size: {}, blocks: BLOCKS }).replies, [{ shown: false, stale: true, reason: "畫面已經換頁，這份譯文不畫" }]);
   assert.equal(s.overlay(), null);
 });
 

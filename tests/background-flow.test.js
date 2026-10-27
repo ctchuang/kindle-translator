@@ -611,23 +611,83 @@ test.describe("jobs: turning away, back, and cancelling", () => {
     assert.equal(ext.overlaysSent().length, 0);
   });
 
-  test("the page refusing an overlay from before a turn is shown as a warning", async () => {
+  test("the page refusing an overlay because it moved on is only logged", async () => {
     const ext = startExtension();
-    ext.tab.onOverlay = () => ({ shown: false, reason: "畫面已經換頁，這份譯文不畫" });
+    ext.tab.onOverlay = () => ({ shown: false, stale: true, reason: "畫面已經換頁，這份譯文不畫" });
     await showAndWait(ext, 0);
-    assert.equal(ext.msgs("warn").at(-1).text, "覆蓋層沒有顯示：畫面已經換頁，這份譯文不畫");
+    assert.equal(ext.msgs("warn").length, 0);
+    assert.ok(ext.hasLog(/覆蓋層沒有顯示：畫面已經換頁，這份譯文不畫/));
   });
 
-  test("the button while translating the same screen cancels and starts over", async () => {
-    const ext = startExtension({ claude: (req) => (req.n < 2 ? { hang: true } : undefined) });
+  test("the page refusing an overlay for another reason is a warning", async () => {
+    const ext = startExtension();
+    ext.tab.onOverlay = () => ({ shown: false, reason: "看不到書頁圖片" });
+    await showAndWait(ext, 0);
+    assert.equal(ext.msgs("warn").at(-1).text, "覆蓋層沒有顯示：看不到書頁圖片");
+  });
+
+  test("screens shown in quick succession: only the last is drawn from the cache", async () => {
+    const ext = startExtension();
+    await showAndWait(ext, 0);
+    await showAndWait(ext, 1);
+    const before = ext.overlaysSent().length;
+    const results = ext.msgs("result").length;
+    // Both reported before either is handled.
+    const sender = { tab: { ...ext.chrome._.activeTab } };
+    ext.tab.index = 1;
+    await Promise.all([ext.ctx.onPageShown({ type: "pageShown", page: ext.info(0) }, sender), ext.ctx.onPageShown({ type: "pageShown", page: ext.info(1) }, sender)]);
+    await ext.idle();
+    const drawn = ext.overlaysSent().slice(before).map((o) => o.page.start);
+    assert.deepEqual(drawn, [ext.info(1).start]);
+    assert.equal(ext.msgs("result").length, results + 1);
+    assert.equal(ext.msgs("warn").length, 0);
+  });
+
+  test("the button while the screen is being translated waits for it instead of paying twice", async () => {
+    const gate = deferred();
+    const ext = startExtension({ claude: async (req) => (req.n < 2 ? (await gate.promise, undefined) : undefined) });
     await ext.show(0);
     await waitFor(() => ext.claude.calls.length === 2, { what: "first requests" });
     await ext.pressTranslate();
+    gate.resolve();
+    await ext.idle();
+    assert.ok(!ext.hasLog(/取消進行中的請求/));
+    assert.equal(ext.claude.of("translate").length, 2, "nothing sent again");
+    assert.equal(ext.overlaysSent().length, 1);
+  });
+
+  test("pressing again while a retranslation runs cancels it and starts over", async () => {
+    let hang = false;
+    const ext = startExtension({ claude: () => (hang ? { hang: true } : undefined) });
+    await showAndWait(ext, 0);
+    hang = true;
+    await ext.pressTranslate(); // retranslate: hangs
+    await waitFor(() => ext.claude.calls.length > 4, { what: "retranslation requests" });
+    hang = false;
+    await ext.pressTranslate(); // still the drawn screen: retranslate again
     await ext.idle();
     assert.ok(ext.hasLog(/手動翻譯：取消進行中的請求，改翻目前畫面/));
     assert.ok(ext.hasLog(/已取消前一個請求/));
-    assert.equal(ext.overlaysSent().length, 1);
+    assert.equal(ext.overlaysSent().length, 2);
     assert.equal(ext.msgs("error").length, 0);
+  });
+
+  test("paragraphs Claude leaves blank are cached as blank, not asked for again", async () => {
+    const ext = startExtension({
+      settings: { quality: "haiku", prefetch: true },
+      claude: (req) => req.kind === "translate" && { json: { translations: req.items.map((p, i) => ({ id: p.id, text: i === 0 ? "" : `譯：${p.text}` })), notes: "", summarized: false } },
+    });
+    const forScreen1 = () => ext.claude.of("translate").filter((r) => r.items.some((p) => ext.texts(1).includes(p.text))).length;
+    await showAndWait(ext, 1);
+    const asked = forScreen1();
+    assert.ok(asked >= 1);
+    await showAndWait(ext, 2);
+    await showAndWait(ext, 1);
+    assert.equal(ext.msgs("result").at(-1).cached, true, "screen 1 drawn from the cache, blanks and all");
+    assert.equal(forScreen1(), asked, "nothing of screen 1 asked for again");
+    assert.ok(ext.hasLog(/下一頁已經翻好/), "screen 2 counts as done too");
+    const blanks = ext.cachedParas().filter((k) => ext.session()[k].text === "");
+    assert.ok(blanks.length >= 1);
   });
 
   test("paragraphs another job failed to get are sent again", async () => {

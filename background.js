@@ -192,14 +192,15 @@ async function cacheRead(keys) {
   return keys.length ? chrome.storage.session.get(keys) : {};
 }
 
-// The cached translation of each of the record's paragraphs that has text,
-// as paragraph key → text; null when any is missing.
+// The cached translation of each of the record's paragraphs that has text
+// (blank for what Claude took for noise), as paragraph key → text; null
+// when any is missing.
 async function cachedTexts(page, record) {
   const want = record.paras.filter((p) => p.source.trim());
   const keys = want.map((p) => paraKey(page, p));
   const have = await cacheRead(keys);
   const texts = new Map();
-  for (const k of keys) if (have[k]?.text) texts.set(k, have[k].text);
+  for (const k of keys) if (have[k]) texts.set(k, have[k].text);
   return texts.size === keys.length ? texts : null;
 }
 
@@ -491,9 +492,10 @@ async function translateActivePage({ force = false } = {}) {
   else if (await drawFromCache(page, settings)) return;
   if (current) {
     if (sameScreen(current.page, page)) {
-      if (!force) return; // already on it
-      // A manual retranslate wins: cancel the running API call instead of
-      // waiting for it. Tokens it already used are still billed.
+      // Already on it: wait for it rather than pay twice. Only a retranslate
+      // (pressed again on a screen just redone) cancels it and starts over;
+      // tokens it already used are still billed.
+      if (!retranslate) return current.done;
       log("手動翻譯：取消進行中的請求，改翻目前畫面");
       current.controller.abort();
       current = null;
@@ -654,7 +656,7 @@ async function translateRecord(job, record, settings) {
   const texts = new Map();
   if (!job.force) {
     const have = await cacheRead(want.map(keyOf));
-    for (const p of want) if (have[keyOf(p)]?.text) texts.set(keyOf(p), have[keyOf(p)].text);
+    for (const p of want) if (have[keyOf(p)]) texts.set(keyOf(p), have[keyOf(p)].text);
   }
   let pending = want.filter((p) => !texts.has(keyOf(p)));
   const out = { texts, sent: 0, reused: texts.size, notes: "", fallbackModel: null, summary: false };
@@ -677,8 +679,9 @@ async function translateRecord(job, record, settings) {
         out.summary ||= got.summary;
         const items = {};
         send.forEach((p, i) => {
-          const text = got.texts[i];
-          if (!text) return;
+          // Blank too: what Claude takes for noise stays blank, rather than
+          // being asked for again every time the screen comes back.
+          const text = got.texts[i] || "";
           texts.set(keyOf(p), text);
           items[keyOf(p)] = { source: p.source, text, savedAt: Date.now() };
         });
@@ -687,15 +690,15 @@ async function translateRecord(job, record, settings) {
       }
     } finally {
       for (const [k, d] of own) {
-        d.resolve(texts.get(k) ?? null);
+        d.resolve(texts.has(k) ? texts.get(k) : null);
         if (inflight.get(k) === d.promise) inflight.delete(k);
       }
     }
     const results = await Promise.all(waited);
-    waits.forEach((p, i) => results[i] && texts.set(keyOf(p), results[i]));
-    out.reused += results.filter(Boolean).length;
+    waits.forEach((p, i) => results[i] !== null && texts.set(keyOf(p), results[i]));
+    out.reused += results.filter((r) => r !== null).length;
     // Only what the other job failed to get goes round again.
-    pending = waits.filter((p, i) => !results[i]);
+    pending = waits.filter((p, i) => results[i] === null);
     if (round >= 1) break;
   }
   return out;
@@ -753,6 +756,9 @@ function deferred() {
 // Draw a screen's translation on the page and post it to the side panel.
 // `textOf(para)` gives each record paragraph's translation (or nothing).
 async function draw(page, record, textOf, { cached = false, post = true, fallbackModel = null, summary = false } = {}) {
+  // Several screens can be shown in quick succession, each handled while the
+  // last is still being looked up; only the one on screen now is drawn.
+  if (!sameScreen(await getShown(), page)) return;
   const settings = await getSettings();
   const blocks = record.paras
     .map((p) => ({ kind: p.kind, text: textOf(p) || "", boxes: p.boxes, fg: p.fg }))
@@ -778,7 +784,9 @@ async function showOnPage(page, record, blocks) {
   }
   if (!res?.shown) {
     const why = res?.reason || "頁面沒有回應";
-    broadcast({ type: "warn", text: `覆蓋層沒有顯示：${why}` });
+    // The reader moved on in the meantime: nothing wrong, the next screen's
+    // own translation follows.
+    if (!res?.stale) broadcast({ type: "warn", text: `覆蓋層沒有顯示：${why}` });
     log(`覆蓋層沒有顯示：${why}`);
   } else {
     log(`覆蓋層已畫上 ${blocks.length} 段`);
