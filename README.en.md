@@ -58,6 +58,11 @@ Translations are kept per paragraph, by the paragraph's position in the book, wh
 
 ## Release notes
 
+- **2.0.1**: fixes to 2.0.0.
+  - Pressing 「翻譯這一頁」 (translate this page) while the page is being translated now waits for it instead of cancelling and paying again.
+  - Paragraphs Claude leaves blank as noise are cached too, so turning back or translating ahead doesn't ask for them again.
+  - Flipping quickly no longer draws or posts a page already turned past, nor shows a red warning.
+  - An empty page-data response from the reader no longer causes an error; the log's count of screens compared counts only those actually compared.
 - **2.0.0**: uses the reader's own page data, and translates the next page ahead.
   - Listens in on the page data the reader fetches, draws the page from it and compares it pixel by pixel with the screen, so the page on screen is known exactly; no more screenshot fingerprints, and the toolbar or cursor no longer count as a page turn.
   - Paragraphs, headings and illustrations come from the page data, replacing the DocLayout-YOLO layout model: no WebGPU needed, and no 75 MB download.
