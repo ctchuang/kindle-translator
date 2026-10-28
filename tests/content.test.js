@@ -17,7 +17,7 @@ function setup(t, { sync = {}, innerWidth = 1000, innerHeight = 800, html = READ
   const chrome = createChrome({ sync, runtimeId });
   // The background: answers nothing, but records what it was sent.
   chrome._.runtimeMessageHandler = () => undefined;
-  const page = loadPage(["page-render.js", "content.js"], {
+  const page = loadPage(["page-render.js", "styled-text.js", "content.js"], {
     chrome,
     html,
     innerWidth,
@@ -132,13 +132,13 @@ test("re-injecting into the same page doesn't add a second set of listeners", (t
   assert.equal(s.page.observers.length, 1);
 });
 
-test("the manifest loads the hook in the page's world first, then page-render.js and content.js", () => {
+test("the manifest loads the hook in the page's world first, then page-render.js, styled-text.js and content.js", () => {
   const manifest = JSON.parse(source("manifest.json"));
   const [hook, cs] = manifest.content_scripts;
   assert.deepEqual(hook.js, ["page-hook.js"]);
   assert.equal(hook.world, "MAIN");
   assert.equal(hook.run_at, "document_start");
-  assert.deepEqual(cs.js, ["page-render.js", "content.js"]);
+  assert.deepEqual(cs.js, ["page-render.js", "styled-text.js", "content.js"]);
   assert.equal(cs.world, undefined);
   assert.equal(cs.run_at, "document_start");
   assert.ok(!cs.all_frames && !hook.all_frames, "top frame only");
@@ -261,6 +261,7 @@ test("a new page image is identified and reported", async (t) => {
     height: 200,
     fill: "#ffffff",
     ink: "#000000",
+    highlights: [],
   });
   assert.ok(msg.tried >= 1 && msg.tried <= 6);
   assert.equal(typeof msg.ms, "number");
@@ -459,7 +460,8 @@ test("currentPage after a failure says why", async (t) => {
 test("pageData: the screen, its paragraphs and columns", async (t) => {
   const s = await ready(t);
   const reply = await s.ask({ type: "pageData", key: L.key, start: s.shown.start });
-  assert.deepEqual(reply.page, s.shown);
+  const { highlights, ...screen } = s.shown;
+  assert.deepEqual(reply.page, screen, "the screen, without the highlights only the one on show has");
   assert.deepEqual(reply.columns, [
     [0, 150],
     [150, 300],
@@ -782,6 +784,151 @@ test("columnRight: the right edge of the widest block in the column", (t) => {
   assert.equal(columnRight(rects, 0), 480);
   assert.equal(columnRight(rects, 3), 900);
   assert.equal(columnRight([{ x0: 0, y0: 0, x1: 10, y1: 10 }], 0), 10);
+});
+
+// ---- Highlights and styled translations ----
+
+// A highlight the reader draws: one element per word, its class naming the
+// position range, positioned in viewport pixels.
+function addHighlight(s, { start, end, rects, color = "rgba(255, 235, 59, 0.5)", name = "yellow" }) {
+  const host = s.page.document.getElementById("kr-renderer");
+  for (const [left, top, width, height] of rects) {
+    const el = s.page.document.createElement("div");
+    el.className = `kg-client-highlight kg-${name}-highlight ${start}/${end} kg-decoration`;
+    Object.assign(el.style, { position: "absolute", left: `${left}px`, top: `${top}px`, width: `${width}px`, height: `${height}px`, backgroundColor: color });
+    host.append(el);
+  }
+  s.page.mutate([{ type: "childList", target: host, addedNodes: [{}], removedNodes: [] }]);
+}
+
+test("the highlights on show come with the screen, in page pixels and the reader's colour", async (t) => {
+  const s = setup(t);
+  await deliver(s, L, 0, 6);
+  // The page image is 1000×800 over a 300×200 page: ×1/3.33 to page pixels.
+  addHighlight(s, { start: 1010, end: 1030, rects: [[100, 80, 50, 20], [150, 80, 40, 20]] });
+  addHighlight(s, { start: 1200, end: 1210, rects: [[300, 300, 30, 20]], color: "rgb(160, 200, 255)", name: "blue" });
+  const msg = await show(s, L, 0);
+  assert.deepEqual(msg.page.highlights, [
+    { start: 1010, end: 1030, color: "rgba(255, 235, 59, 0.5)", boxes: [{ x0: 30, y0: 20, x1: 45, y1: 25 }, { x0: 45, y0: 20, x1: 57, y1: 25 }] },
+    { start: 1200, end: 1210, color: "rgb(160, 200, 255)", boxes: [{ x0: 90, y0: 75, x1: 99, y1: 80 }] },
+  ]);
+  assert.deepEqual((await s.ask({ type: "currentPage" })).page.highlights, msg.page.highlights);
+});
+
+test("elements without a position range, or of no size, aren't highlights", async (t) => {
+  const s = setup(t);
+  await deliver(s, L, 0, 6);
+  addHighlight(s, { start: 5, end: 9, rects: [[10, 10, 0, 0]] });
+  const odd = s.page.document.createElement("div");
+  odd.className = "kg-client-highlight kg-yellow-highlight";
+  Object.assign(odd.style, { left: "1px", top: "1px", width: "5px", height: "5px" });
+  s.page.document.getElementById("kr-renderer").append(odd);
+  assert.deepEqual((await show(s, L, 0)).page.highlights, []);
+});
+
+test("adding or removing a highlight reports the same screen again, with its highlights", async (t) => {
+  const s = await ready(t);
+  addHighlight(s, { start: 1010, end: 1030, rects: [[100, 80, 50, 20]] });
+  await waitFor(() => s.sent("pageShown").length === 2, { what: "second report" });
+  const second = s.sent("pageShown")[1];
+  assert.equal(second.highlights, true);
+  assert.equal(second.page.start, s.shown.start);
+  assert.equal(second.page.highlights.length, 1);
+  // Unrelated DOM churn with the same highlights reports nothing.
+  s.page.mutate([{ type: "childList", target: s.page.document.body, addedNodes: [{}], removedNodes: [] }]);
+  await sleep(10);
+  assert.equal(s.sent("pageShown").length, 2);
+  // Removing it reports again, with none.
+  for (const el of s.page.document.querySelectorAll(".kg-client-highlight")) el.remove();
+  s.page.mutate([{ type: "childList", target: s.page.document.body, addedNodes: [], removedNodes: [{}] }]);
+  await waitFor(() => s.sent("pageShown").length === 3, { what: "third report" });
+  assert.deepEqual(plain(s.sent("pageShown")[2].page.highlights), []);
+});
+
+test("highlights removed and drawn again at once (as the reader does when one is added) report once", async (t) => {
+  const s = await ready(t);
+  addHighlight(s, { start: 1010, end: 1030, rects: [[100, 80, 50, 20]] });
+  await waitFor(() => s.sent("pageShown").length === 2, { what: "report" });
+  // The reader adds one: it removes them all, then draws both.
+  for (const el of s.page.document.querySelectorAll(".kg-client-highlight")) el.remove();
+  s.page.mutate([{ type: "childList", target: s.page.document.body, addedNodes: [], removedNodes: [{}] }]);
+  addHighlight(s, { start: 1010, end: 1030, rects: [[100, 80, 50, 20]] });
+  addHighlight(s, { start: 1200, end: 1210, rects: [[300, 300, 30, 20]], color: "rgb(130, 180, 255)", name: "blue" });
+  await sleep(40);
+  assert.equal(s.sent("pageShown").length, 3, "one report, not one for 'none' and one for two");
+  assert.equal(s.sent("pageShown")[2].page.highlights.length, 2);
+});
+
+test("currentPage waits for an identification that starts while it waits", async (t) => {
+  const s = setup(t);
+  await deliver(s, L, 0, 6);
+  await show(s, L, 1, { complete: false, wait: false });
+  const reply = s.ask({ type: "currentPage" });
+  // While it waits on the first image, a second one replaces it.
+  await show(s, L, 2, { wait: false });
+  assert.equal((await reply).page.start, L.screens[2].startPositionId);
+});
+
+test("a highlight change keeps the overlay; the screen's translation is redrawn for it", async (t) => {
+  const s = await ready(t);
+  draw(s, overlayMsg(s.shown, BLOCKS));
+  addHighlight(s, { start: 1010, end: 1030, rects: [[100, 80, 50, 20]] });
+  await waitFor(() => s.sent("pageShown").length === 2, { what: "report" });
+  assert.equal(s.overlay().childElementCount, 4, "not cleared: the screen is the same");
+  assert.deepEqual(draw(s, overlayMsg(s.sent("pageShown")[1].page, BLOCKS)).replies, [{ shown: true }], "and its redrawn translation is accepted");
+});
+
+test("styled translations: italics in a kai face, bold, highlights on their colour", async (t) => {
+  const s = await ready(t);
+  const blocks = [{ kind: "paragraph", text: "讀<i>建構推理模型</i>這本<h1>書<b>很</b>好</h1>。", fg: "#000", marks: { h1: "rgba(255, 235, 59, 0.5)" }, boxes: [{ x0: 100, y0: 100, x1: 900, y1: 200, lines: 3 }] }];
+  draw(s, overlayMsg(s.shown, blocks));
+  const [box] = s.overlay().children;
+  assert.equal(box.textContent, "讀建構推理模型這本書很好。");
+  const spans = box.querySelectorAll("span");
+  assert.deepEqual(
+    spans.map((sp) => [sp.textContent, sp.style.fontFamily ?? "", sp.style.fontWeight ?? "", sp.style.background ?? ""]),
+    [
+      ["建構推理模型", s.page.ctx.run("KAI"), "", ""],
+      ["書", "", "", "rgba(255, 235, 59, 0.5)"],
+      ["很", "", "700", "rgba(255, 235, 59, 0.5)"],
+      ["好", "", "", "rgba(255, 235, 59, 0.5)"],
+    ]
+  );
+});
+
+test("a highlight mark with no colour given, or unknown marks, draw plainly", async (t) => {
+  const s = await ready(t);
+  draw(s, overlayMsg(s.shown, [{ kind: "paragraph", text: "一<h2>二</h2>三", fg: "#000", boxes: [{ x0: 100, y0: 100, x1: 900, y1: 200, lines: 3 }] }]));
+  const [span] = s.overlay().children[0].querySelectorAll("span");
+  assert.equal(span.textContent, "二");
+  assert.equal(span.style.background, undefined);
+});
+
+test("a translation that looks like HTML is drawn as text, never parsed", async (t) => {
+  const s = await ready(t);
+  const text = '<img src=x onerror="alert(1)"><script>bad()</script><i>斜</i>';
+  draw(s, overlayMsg(s.shown, [{ kind: "paragraph", text, fg: "#000", boxes: [{ x0: 100, y0: 100, x1: 900, y1: 200, lines: 3 }] }]));
+  const [box] = s.overlay().children;
+  assert.equal(box.querySelectorAll("img").length + box.querySelectorAll("script").length, 0);
+  assert.equal(box.textContent, '<img src=x onerror="alert(1)"><script>bad()</script>斜');
+});
+
+test("broken marks are drawn as plain text", async (t) => {
+  const s = await ready(t);
+  draw(s, overlayMsg(s.shown, [{ kind: "paragraph", text: "<i>沒有關上", fg: "#000", boxes: [{ x0: 100, y0: 100, x1: 900, y1: 200, lines: 3 }] }]));
+  const [box] = s.overlay().children;
+  assert.equal(box.textContent, "沒有關上");
+  assert.equal(box.querySelectorAll("span").length, 0);
+});
+
+test("a styled paragraph split across two columns keeps its styles on both sides", async (t) => {
+  const s = await ready(t);
+  const text = `前半段${"甲".repeat(10)}<i>${"乙".repeat(20)}</i>後半段。`;
+  const blocks = [{ kind: "paragraph", text, fg: "#000", boxes: [{ x0: 50, y0: 600, x1: 450, y1: 700, lines: 2 }, { x0: 550, y0: 40, x1: 950, y1: 140, lines: 2 }] }];
+  draw(s, overlayMsg(s.shown, blocks));
+  const [left, right] = s.overlay().children;
+  assert.equal(left.textContent + right.textContent, "前半段" + "甲".repeat(10) + "乙".repeat(20) + "後半段。");
+  assert.ok(left.querySelectorAll("span").length >= 1 && right.querySelectorAll("span").length >= 1, "italics on both sides of the cut");
 });
 
 // ---- Floating toggle ----

@@ -15,6 +15,8 @@ const { layoutOf } = require("../../page-render.js");
 
 const FONT_NORMAL = "testserifNormal";
 const FONT_BOLD = "testserifBold";
+const FONT_ITALIC = "testserifItalic";
+const FONT_BOLD_ITALIC = "testserifBoldItalic";
 const UNITS = 1000;
 
 // Advance and height (font units) of a character's glyph.
@@ -99,6 +101,7 @@ function layoutBook(book, { fontSize = 10, width = 300, height = 200, columns = 
   const pitch = (size) => Math.round(size * 1.4);
   const screens = [];
   const lineText = new Map();
+  const lineInfo = [];
   let screen = null;
   let col = 0;
   let y = 0;
@@ -172,33 +175,63 @@ function layoutBook(book, { fontSize = 10, width = 300, height = 200, columns = 
       room(pitch(size));
       if (box && (screen !== before || col !== beforeCol)) closeBox();
       const baseline = y + size;
-      const glyphs = [...l.text].map((ch) => ch.charCodeAt(0));
-      const xPosition = [];
+      // Every glyph's x from the line's start; the line's words, and the
+      // style of each (p.styles: word index in the paragraph → "i", "b" or
+      // "bi"), so a line splits into one run per stretch of one style, all
+      // sharing the line's origin as the reader's do.
+      const chars = [...l.text];
+      const xs = [];
       let x = 0;
-      for (const g of glyphs) {
-        xPosition.push(+x.toFixed(4));
-        x += glyphShape(g).advance * scale;
+      for (const ch of chars) {
+        xs.push(+x.toFixed(4));
+        x += glyphShape(ch.charCodeAt(0)).advance * scale;
+      }
+      const firstWord = l.offset ? p.text.slice(0, l.offset).split(" ").length - 1 : 0;
+      const lineWords = [];
+      let at = 0;
+      for (const [k, text] of l.text.split(" ").entries()) {
+        lineWords.push({ text, from: at, to: at + text.length, style: p.styles?.[firstWord + k] ?? "" });
+        at += text.length + 1;
+      }
+      const stretches = [];
+      for (const wd of lineWords) {
+        const last = stretches.at(-1);
+        if (last && last.style === wd.style) last.to = wd.to;
+        else {
+          if (last) last.to = wd.from; // the space before a new style stays with the last run
+          stretches.push({ from: wd.from, to: wd.to, style: wd.style });
+        }
       }
       const start = p.start + l.offset;
       const end = start + l.text.length - 1;
-      screen.children.push({
-        type: "run",
-        transform: [1, 0, 0, 1, colLeft(col), baseline],
-        elementId: p.elementId,
-        rect: { top: -size, left: 0, bottom: size * 0.3, right: +x.toFixed(4) },
-        startPosition: `${p.elementId};${l.offset}`,
-        endPosition: `${p.elementId};${l.offset + l.text.length}`,
-        startPositionId: start,
-        endPositionId: end,
-        textColor: p.color ?? ink,
-        fontKey,
-        fontFamily: "testserif",
-        fontSize: size,
-        fontWeight: p.heading ? 700 : 400,
-        fontStyle: "normal",
-        glyphs,
-        xPosition,
-      });
+      for (const st of stretches) {
+        const italic = st.style.includes("i");
+        const boldRun = p.heading || st.style.includes("b");
+        const runChars = chars.slice(st.from, st.to);
+        const runEnd = st.to < chars.length ? xs[st.to] : x;
+        screen.children.push({
+          type: "run",
+          transform: [1, 0, 0, 1, colLeft(col), baseline],
+          elementId: p.elementId,
+          rect: { top: -size, left: xs[st.from], bottom: size * 0.3, right: +runEnd.toFixed(4) },
+          startPosition: `${p.elementId};${l.offset + st.from}`,
+          endPosition: `${p.elementId};${l.offset + st.to}`,
+          startPositionId: start + st.from,
+          endPositionId: start + st.to - 1,
+          textColor: p.color ?? ink,
+          fontKey: italic ? (boldRun ? FONT_BOLD_ITALIC : FONT_ITALIC) : boldRun ? FONT_BOLD : fontKey,
+          fontFamily: "testserif",
+          fontSize: size,
+          fontWeight: boldRun ? 700 : 400,
+          fontStyle: italic ? "italic" : "normal",
+          glyphs: runChars.map((ch) => ch.charCodeAt(0)),
+          xPosition: xs.slice(st.from, st.to),
+        });
+      }
+      // What OCR reads on this line: its text, box and words, in page pixels.
+      const left = colLeft(col);
+      const wordBox = (wd) => ({ text: wd.text, x0: left + xs[wd.from], y0: baseline - size, x1: left + (wd.to < chars.length ? xs[wd.to] : x), y1: baseline + size * 0.3 });
+      lineInfo.push({ screen: screens.length - 1, start, element: p.elementId, text: l.text, x0: left, y0: baseline - size, x1: left + x, y1: baseline + size * 0.3, words: lineWords.filter((wd) => wd.text).map(wordBox) });
       if (p.box) {
         if (!box) {
           const group = {
@@ -257,7 +290,9 @@ function layoutBook(book, { fontSize = 10, width = 300, height = 200, columns = 
   };
   // Every font and glyph the layout uses, as page-render.js keeps them.
   const fonts = Object.fromEntries(fontsFor(runsOf(screens)).map((f) => [f.fontKey, { unitsPerEm: f.unitsPerEm, glyphs: f.glyphs }]));
-  return { key, params, url, screens, lineText, response, fonts, fill: fill.slice(0, 7), ink: ink.slice(0, 7) };
+  // The lines of screen `index`, as OCR would read them.
+  const linesOf = (index) => lineInfo.filter((l) => l.screen === index);
+  return { key, params, url, screens, lineText, linesOf, response, fonts, fill: fill.slice(0, 7), ink: ink.slice(0, 7) };
 }
 
 // A ustar archive with a PAX header before every file, like the reader's.
@@ -291,4 +326,4 @@ function makeTar(files) {
   return new Uint8Array(Buffer.concat(blocks));
 }
 
-module.exports = { makeBook, makeTar, words, glyphShape, glyphOutline, fontsFor, FONT_NORMAL, FONT_BOLD };
+module.exports = { makeBook, makeTar, words, glyphShape, glyphOutline, fontsFor, FONT_NORMAL, FONT_BOLD, FONT_ITALIC };

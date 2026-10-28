@@ -370,6 +370,63 @@ test.describe("pageParagraphs", () => {
   });
 });
 
+// ---- style boxes: italic and bold runs within a paragraph ----
+
+test.describe("styleBoxes", () => {
+  const styledRun = (opts) => ({ ...run(opts), fontStyle: opts.italic ? "italic" : "normal" });
+
+  test("an italic run in a roman paragraph is an italic style box over its glyphs", () => {
+    const p = screen([
+      run({ el: 1, x: 10, text: "read the book ", start: 1 }),
+      { ...styledRun({ el: 1, x: 10, text: "Alice", start: 15, italic: true }), xPosition: [70, 75, 80, 85, 90] },
+      { ...run({ el: 1, x: 10, text: " now", start: 20 }), xPosition: [95, 100, 105, 110] },
+    ]);
+    const [para] = R.pageParagraphs(p);
+    assert.deepEqual(para.styleBoxes, [{ styles: ["i"], x0: 80, y0: 10, x1: 105, y1: 23 }]);
+  });
+
+  test("a bold run in a regular paragraph is a bold box; bold italic is both", () => {
+    const p = screen([run({ el: 1, text: "plain words here and more", start: 1 }), { ...styledRun({ el: 1, text: "BI", start: 30, italic: true, weight: 700 }), xPosition: [200, 206] }]);
+    assert.deepEqual(R.pageParagraphs(p)[0].styleBoxes[0].styles, ["i", "b"]);
+  });
+
+  test("in a paragraph mostly in italics, italics are no style of their own", () => {
+    const p = screen([styledRun({ el: 1, text: "mostly italic words", start: 1, italic: true }), { ...run({ el: 1, text: "x", start: 30 }), xPosition: [150] }]);
+    assert.deepEqual(R.pageParagraphs(p)[0].styleBoxes, [], "the roman word isn't marked either");
+  });
+
+  test("a bold heading has no bold box", () => {
+    const p = screen([run({ el: 1, size: 16, weight: 700, text: "Title", start: 1 }), run({ el: 2, text: "c".repeat(80), start: 10, y: 60 })]);
+    assert.deepEqual(R.pageParagraphs(p)[0].styleBoxes, []);
+  });
+
+  test("a paragraph without styled runs has no boxes", () => {
+    assert.deepEqual(R.pageParagraphs(screen([run()]))[0].styleBoxes, []);
+  });
+
+  test("glyphSpan: from the first glyph to one step past the last", () => {
+    const r = { ...run({ x: 10, y: 20, size: 10, text: "abc" }), xPosition: [100, 104, 108] };
+    assert.deepEqual(R.glyphSpan(r), { x0: 110, y0: 10, x1: 122, y1: 23 });
+    const one = { ...run({ x: 10, y: 20, size: 10, text: "a" }), xPosition: [50] };
+    assert.deepEqual(R.glyphSpan(one), { x0: 60, y0: 10, x1: 66, y1: 23 }, "a single glyph is 0.6 em wide");
+  });
+
+  test("the test book's styled words come out as style boxes over those words", () => {
+    const book = makeBook({ paragraphs: ["the cat read Alice in Wonderland by the fire and then slept until noon", "next paragraph"], asin: "B0STYLE" });
+    const styledBook = makeBook({ paragraphs: [{ text: book.paras[0].text, styles: { 3: "i", 4: "i", 5: "i", 8: "b" } }, "next paragraph"] });
+    const L = styledBook.layout({ columns: 1 });
+    const [para] = R.pageParagraphs(L.screens[0]);
+    assert.deepEqual(
+      para.styleBoxes.map((b) => b.styles),
+      [["i"], ["b"]]
+    );
+    const words = L.linesOf(0)[0].words;
+    const centre = (w) => (w.x0 + w.x1) / 2;
+    assert.ok(centre(words[3]) > para.styleBoxes[0].x0 && centre(words[5]) < para.styleBoxes[0].x1, "Alice in Wonderland is inside the italic box");
+    assert.ok(centre(words[2]) < para.styleBoxes[0].x0 && centre(words[6]) > para.styleBoxes[0].x1, "its neighbours aren't");
+  });
+});
+
 // ---- drawing ----
 
 test.describe("renderPage", () => {
@@ -683,54 +740,5 @@ test.describe("identifyScreen", () => {
     assert.equal(R.screenAfter(pages, 15).startPositionId, 20);
     assert.equal(R.screenAfter(pages, 30), null);
     assert.equal(R.screenAfter([], 0), null);
-  });
-});
-
-// ---- splitting a translation between columns ----
-
-test.describe("splitText", () => {
-  test("one weight: the whole text", () => {
-    assert.deepEqual(R.splitText("全部的文字", [3]), ["全部的文字"]);
-  });
-
-  test("splits by the weights, at punctuation near the share", () => {
-    const text = "第一句話在這裡，第二句話也在這裡。第三句。";
-    const [a, b] = R.splitText(text, [1, 1]);
-    assert.equal(a + b, text);
-    assert.match(a, /[，。]$/);
-    assert.ok(Math.abs([...a].length - [...text].length / 2) <= 8);
-  });
-
-  test("uneven weights give uneven parts", () => {
-    const text = "一二三四五六七八九十".repeat(6);
-    const [a, b] = R.splitText(text, [5, 1]);
-    assert.equal(a + b, text);
-    assert.equal([...a].length, 50);
-  });
-
-  test("English splits at a space and loses it", () => {
-    const [a, b] = R.splitText("one two three four five six", [1, 1]);
-    assert.equal(`${a} ${b}`, "one two three four five six");
-  });
-
-  test("three parts, and parts never run backwards", () => {
-    const parts = R.splitText("甲乙丙丁戊己庚辛壬癸", [1, 1, 1]);
-    assert.equal(parts.length, 3);
-    assert.equal(parts.join(""), "甲乙丙丁戊己庚辛壬癸");
-  });
-
-  test("zero weights or no text", () => {
-    assert.deepEqual(R.splitText("文字", [0, 0]), ["文字", ""]);
-    assert.deepEqual(R.splitText("", [1, 1]), ["", ""]);
-  });
-
-  test("characters outside the BMP aren't cut in half", () => {
-    const text = "𠀀𠀁𠀂𠀃";
-    const parts = R.splitText(text, [1, 1]);
-    assert.equal(parts.join(""), text);
-    assert.deepEqual(
-      parts.map((p) => [...p].length),
-      [2, 2]
-    );
   });
 });

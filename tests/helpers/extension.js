@@ -37,13 +37,13 @@ function screenInfo(layout, page) {
 }
 
 // The text OCR reads in each of a screen's paragraphs (what the background
-// sends to Claude), in paragraph order.
+// sends to Claude, without style marks), in paragraph order.
 function paragraphTexts(layout, page) {
-  const runs = page.children.filter((c) => c.type === "run");
+  const lines = layout.linesOf(layout.screens.indexOf(page));
   return R.pageParagraphs(page).map((p) =>
-    runs
-      .filter((r) => (r.elementId ?? `@${r.startPositionId}`) === p.id)
-      .map((r) => layout.lineText.get(r.startPositionId))
+    lines
+      .filter((l) => l.element === p.id)
+      .map((l) => l.text)
       .join(" ")
   );
 }
@@ -97,6 +97,7 @@ function startExtension({ settings = {}, session = {}, panel = true, book = test
     layouts: new Map([[first.key, first]]),
     index: 0,
     error: null, // what currentPage answers instead of a screen
+    highlights: [], // on the screen shown, as content.js reports them
     overlay: null, // the overlay message drawn
     enabled: true,
     cleared: 0,
@@ -113,7 +114,7 @@ function startExtension({ settings = {}, session = {}, panel = true, book = test
   chrome._.tabMessageHandler = async (tabId, msg) => {
     switch (msg.type) {
       case "currentPage":
-        return tab.error ? { error: tab.error } : { page: screenInfo(tab.layout, screen()) };
+        return tab.error ? { error: tab.error } : { page: { ...screenInfo(tab.layout, screen()), highlights: tab.highlights } };
       case "pageData": {
         if (tab.onPageData) {
           const r = await tab.onPageData(msg);
@@ -173,14 +174,10 @@ function startExtension({ settings = {}, session = {}, panel = true, book = test
       if (r) return r;
     }
     const layout = tab.layouts.get(drawn.key);
-    const page = layout.screens.find((s) => s.startPositionId === drawn.start);
+    const index = layout.screens.findIndex((s) => s.startPositionId === drawn.start);
     const scale = Number(layout.params.rasterScale);
-    const lines = page.children
-      .filter((c) => c.type === "run")
-      .map((r) => {
-        const b = R.boxOf(r);
-        return { x0: b.x0 * scale, y0: b.y0 * scale, x1: b.x1 * scale, y1: b.y1 * scale, text: layout.lineText.get(r.startPositionId), confidence: 92 };
-      });
+    const px = (b) => ({ x0: b.x0 * scale, y0: b.y0 * scale, x1: b.x1 * scale, y1: b.y1 * scale });
+    const lines = layout.linesOf(index).map((l) => ({ ...px(l), text: l.text, confidence: 92, words: l.words.map((w) => ({ ...px(w), text: w.text })) }));
     return {
       columns: msg.rects.map((rect) => lines.filter((l) => (l.x0 + l.x1) / 2 >= rect.left && (l.x0 + l.x1) / 2 < rect.left + rect.width)),
     };
@@ -241,8 +238,22 @@ function startExtension({ settings = {}, session = {}, panel = true, book = test
       tab.index = index;
       tab.error = null;
       tab.overlay = null;
-      await ctx.onPageShown({ type: "pageShown", page: screenInfo(layout, layout.screens[index]), tried: 2, ms: 5 }, { tab: { ...chrome._.activeTab } });
+      await ctx.onPageShown({ type: "pageShown", page: { ...screenInfo(layout, layout.screens[index]), highlights: tab.highlights }, tried: 2, ms: 5 }, { tab: { ...chrome._.activeTab } });
       await tick(); // let what it posted reach the panel
+    },
+    // The user adds or removes highlights on the screen shown: content.js
+    // reports it again with the new ones.
+    async setHighlights(list) {
+      tab.highlights = list;
+      await ctx.onPageShown({ type: "pageShown", page: { ...screenInfo(tab.layout, screen()), highlights: list }, highlights: true }, { tab: { ...chrome._.activeTab } });
+      await tick();
+    },
+    // A highlight over paragraph `n` of the screen shown (all its words).
+    highlightOver(n, color = "rgba(255, 235, 59, 0.5)", index = tab.index, layout = tab.layout) {
+      const page = layout.screens[index];
+      const p = R.pageParagraphs(page)[n];
+      const boxes = layout.linesOf(index).filter((l) => l.element === p.id).flatMap((l) => l.words.map(({ x0, y0, x1, y1 }) => ({ x0, y0, x1, y1 })));
+      return { start: p.start, end: p.end, color, boxes };
     },
     // content.js couldn't identify the screen.
     async showError(error) {

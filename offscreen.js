@@ -28,8 +28,10 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
 });
 
 // Recognize each rectangle (page column) of the image separately and return
-// its text lines with boxes in image pixels. Read as one, Tesseract takes the
-// gutter of a two-page spread for a word space and joins both pages' lines.
+// its text lines, and their words, with boxes in image pixels (the words let
+// the worker tell which ones are italic, bold or highlighted). Read as one,
+// Tesseract takes the gutter of a two-page spread for a word space and joins
+// both pages' lines.
 async function ocr({ image, rects }) {
   const worker = await getWorker();
   const columns = [];
@@ -38,7 +40,7 @@ async function ocr({ image, rects }) {
     columns.push(
       (data.blocks || [])
         .flatMap((b) => b.paragraphs.flatMap((p) => p.lines))
-        .map((l) => ({ ...l.bbox, text: l.text, confidence: l.confidence }))
+        .map((l) => ({ ...l.bbox, text: l.text, confidence: l.confidence, words: (l.words || []).map((w) => ({ ...w.bbox, text: w.text })) }))
     );
   }
   return { columns };

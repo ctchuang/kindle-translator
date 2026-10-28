@@ -9,7 +9,7 @@
 // - "vision": Opus reads a screenshot and translates it in one call.
 // See docs/design.md and docs/page-pipeline-v2.md.
 
-importScripts("ocr-layout.js");
+importScripts("ocr-layout.js", "styled-text.js");
 
 // Vision engine: only Opus. In testing, Sonnet 5.5 and Haiku 5.5 declined to
 // translate screenshots of Kindle book pages (citing copyright).
@@ -145,15 +145,52 @@ async function setDrawn(page) {
 // ---- Cache ----
 
 // Per paragraph: { source, text, savedAt } under its position range in the
-// book, the same in any layout. Per screen: how the screen splits into
-// paragraphs, with their boxes and OCR text (its "record"), under the layout
-// key and its start. The vision engine's whole-screen results under vision:.
+// book, the same in any layout (plus a hash of the highlights over it, which
+// the reader can add or remove any time). Per screen: how the screen splits
+// into paragraphs, with their boxes and OCR words (its "record"), under the
+// layout key and its start. The vision engine's whole-screen results under
+// vision:.
 const CACHE_PARAS = 5000;
 const CACHE_PAGES = 500;
 let cacheChain = Promise.resolve(); // index updates one at a time
 
 function paraKey(page, p) {
   return `para:${page.asin}:${page.revision}:${p.start}-${p.end}`;
+}
+
+// Whether a record paragraph has any words to translate.
+function hasText(p) {
+  return (p.words || []).length > 0;
+}
+
+// A record paragraph as sent to Claude: its words, the italic and bold ones
+// and those under a highlight marked (<i>, <b>, <h1>, <h2>… one number per
+// highlight colour, docs/text-styles.md), the colour of each highlight mark,
+// and its cache key, which changes with the highlights over it.
+function paraSource(page, p) {
+  const highlights = (page.highlights || []).filter((h) => h.start <= p.end && h.end >= p.start);
+  const colors = [...new Set(highlights.map((h) => h.color))];
+  const marks = Object.fromEntries(colors.map((c, i) => [`h${i + 1}`, c]));
+  const words = (p.words || []).map((w) => {
+    const styles = [...(w.styles || [])];
+    for (const h of highlights) if (h.boxes.some((b) => centreIn(w, b))) styles.push(`h${colors.indexOf(h.color) + 1}`);
+    return { text: w.text, styles };
+  });
+  const source = words.some((w) => w.styles.length) ? tagWords(words) : wordsText(words);
+  const marked = highlights.length ? `:h${hashOf(highlights.map((h) => `${h.start}-${h.end}-${h.color}`).sort().join(";"))}` : "";
+  return { key: paraKey(page, p) + marked, source, marks };
+}
+
+function centreIn(w, b) {
+  const x = (w.x0 + w.x1) / 2;
+  const y = (w.y0 + w.y1) / 2;
+  return x >= b.x0 - 2 && x <= b.x1 + 2 && y >= b.y0 - 2 && y <= b.y1 + 2;
+}
+
+function hashOf(str) {
+  let h = 2166136261;
+  for (let i = 0; i < str.length; i++) h = Math.imul(h ^ str.charCodeAt(i), 16777619);
+  return (h >>> 0).toString(36);
 }
 
 function recordKey(page) {
@@ -196,12 +233,18 @@ async function cacheRead(keys) {
 // (blank for what Claude took for noise), as paragraph key → text; null
 // when any is missing.
 async function cachedTexts(page, record) {
-  const want = record.paras.filter((p) => p.source.trim());
-  const keys = want.map((p) => paraKey(page, p));
+  const keys = record.paras.filter(hasText).map((p) => paraSource(page, p).key);
   const have = await cacheRead(keys);
   const texts = new Map();
   for (const k of keys) if (have[k]) texts.set(k, have[k].text);
   return texts.size === keys.length ? texts : null;
+}
+
+// Whether everything `page` needs is in the cache (a screen without text
+// needs nothing).
+async function screenDone(page) {
+  const record = (await chrome.storage.session.get(recordKey(page)))[recordKey(page)];
+  return !!record && (!record.paras.some(hasText) || !!(await cachedTexts(page, record)));
 }
 
 // Draw `page` from the cache if everything it needs is there. `post`: also
@@ -219,7 +262,7 @@ async function drawFromCache(page, settings, { post = true } = {}) {
   const texts = await cachedTexts(page, record);
   if (!texts) return false;
   log(`命中快取（${texts.size} 段），不呼叫 API`);
-  await draw(page, record, (p) => texts.get(paraKey(page, p)), { cached: true, post });
+  await draw(page, record, (p) => texts.get(paraSource(page, p).key), { cached: true, post });
   return true;
 }
 
@@ -289,7 +332,8 @@ async function onPageShown(msg, sender) {
   if (!(await panelOpen())) return;
   logTabId = tab.id;
   const how = msg.tried ? `（比對 ${msg.tried} 個畫面，${msg.ms ?? "?"} 毫秒）` : "";
-  log(`畫面換到${describeScreen(page)}${how}`);
+  if (msg.highlights) log(`螢光標記改變了（${describeScreen(page)}，${page.highlights?.length ?? 0} 個）`);
+  else log(`畫面換到${describeScreen(page)}${how}`);
   if (current && !sameScreen(current.page, page)) detach(current);
   const settings = await getSettings();
   if (await drawFromCache(page, settings)) return;
@@ -492,10 +536,15 @@ async function translateActivePage({ force = false } = {}) {
   else if (await drawFromCache(page, settings)) return;
   if (current) {
     if (sameScreen(current.page, page)) {
-      // Already on it: wait for it rather than pay twice. Only a retranslate
-      // (pressed again on a screen just redone) cancels it and starts over;
-      // tokens it already used are still billed.
-      if (!retranslate) return current.done;
+      // Already on it: wait for it rather than pay twice, then see whether
+      // anything is still missing (a highlight added meanwhile). Only a
+      // retranslate (pressed again on a screen just redone) cancels it and
+      // starts over; tokens it already used are still billed.
+      if (!retranslate) {
+        await current.done;
+        if (current || ((await getDrawn()) === screenId(page) && (await screenDone(page)))) return;
+        return translateActivePage({ force: false });
+      }
       log("手動翻譯：取消進行中的請求，改翻目前畫面");
       current.controller.abort();
       current = null;
@@ -563,7 +612,7 @@ async function runJob(job, settings) {
   const started = Date.now();
   if (job.kind === "page") broadcast({ type: "working" });
   const record = await screenRecord(job);
-  if (!record.paras.some((p) => p.source.trim())) {
+  if (!record.paras.some(hasText)) {
     log(`這一頁沒有文字（${describeScreen(job.page)}），不用翻譯`);
     if (job.kind === "page" && !job.detached) schedulePrefetch(job.page);
     return;
@@ -579,7 +628,7 @@ async function runJob(job, settings) {
     return;
   }
   job.drew = true;
-  await draw(job.page, record, (p) => out.texts.get(paraKey(job.page, p)), { fallbackModel: out.fallbackModel, summary: out.summary });
+  await draw(job.page, record, (p) => out.texts.get(paraSource(job.page, p).key), { fallbackModel: out.fallbackModel, summary: out.summary });
   // After the result, which clears the status line.
   if (out.summary) broadcast({ type: "warn", text: "Claude 只給了摘要，不是完整翻譯。可以按「重新翻譯本頁」再試。" });
 }
@@ -635,12 +684,13 @@ async function readScreen(job) {
   });
   if (!res || res.error) throw new Error(`OCR 失敗：${res?.error || "offscreen 文件沒有回應"}`);
   job.controller.signal.throwIfAborted();
-  const lines = res.columns.flat().map((l) => ({ ...l, x0: l.x0 / scale, y0: l.y0 / scale, x1: l.x1 / scale, y1: l.y1 / scale }));
-  const texts = assignLines(lines, data.paragraphs);
-  record.paras = data.paragraphs.map((p, i) => ({ start: p.start, end: p.end, kind: p.kind, column: p.column, boxes: p.boxes, fg: p.fg, source: texts[i] }));
-  const empty = texts.filter((t) => !t.trim()).length;
+  const toPage = (b) => ({ x0: b.x0 / scale, y0: b.y0 / scale, x1: b.x1 / scale, y1: b.y1 / scale });
+  const lines = res.columns.flat().map((l) => ({ ...l, ...toPage(l), words: (l.words || []).map((w) => ({ ...w, ...toPage(w) })) }));
+  const words = assignWords(lines, data.paragraphs);
+  record.paras = data.paragraphs.map((p, i) => ({ start: p.start, end: p.end, kind: p.kind, column: p.column, boxes: p.boxes, fg: p.fg, words: words[i] }));
+  const empty = words.filter((w) => !w.length).length;
   log(`OCR 完成：${seconds(started)} 秒，${lines.length} 行${empty ? `，${empty} 段沒有讀到字` : ""}`);
-  const read = texts.filter(Boolean);
+  const read = words.filter((w) => w.length).map(wordsText);
   if (read.length) log(`OCR 文字：${read.join(" ¶ ").slice(0, 400)}`);
   return record;
 }
@@ -651,8 +701,8 @@ async function readScreen(job) {
 // fallbackModel, summary }.
 async function translateRecord(job, record, settings) {
   const { page } = job;
-  const want = record.paras.filter((p) => p.source.trim());
-  const keyOf = (p) => paraKey(page, p);
+  const want = record.paras.filter(hasText).map((p) => ({ ...paraSource(page, p), column: p.column }));
+  const keyOf = (p) => p.key;
   const texts = new Map();
   if (!job.force) {
     const have = await cacheRead(want.map(keyOf));
@@ -706,7 +756,8 @@ async function translateRecord(job, record, settings) {
 
 // Translate paragraphs ({ source, column }) with the configured quality
 // level, retrying a summary. Resolves to { texts (by index), notes,
-// fallbackModel, summary }.
+// fallbackModel, summary }. A translation whose style marks don't hold up
+// (unpaired, crossed, or not in its source) keeps its words without them.
 async function requestTranslations(settings, paras, jobSignal) {
   const plan = qualityOf(settings);
   const items = paras.map((p, id) => ({ id, text: p.source }));
@@ -744,7 +795,12 @@ async function requestTranslations(settings, paras, jobSignal) {
     }
     log(`Claude 這次只給摘要，不是翻譯（${out.notes || "沒有說明"}），自動重新請求`);
   }
-  return { texts: out.texts, notes: out.notes, fallbackModel: out.model !== plan.translate ? out.model : null, summary: isSummary(out) };
+  const texts = out.texts.map((text, i) => {
+    const checked = checkMarks(text, items[i].text);
+    if (!checked.ok) log(`第 ${i + 1} 段譯文的樣式標記不完整，改用不帶樣式的譯文`);
+    return checked.text;
+  });
+  return { texts, notes: out.notes, fallbackModel: out.model !== plan.translate ? out.model : null, summary: isSummary(out) };
 }
 
 function deferred() {
@@ -761,8 +817,8 @@ async function draw(page, record, textOf, { cached = false, post = true, fallbac
   if (!sameScreen(await getShown(), page)) return;
   const settings = await getSettings();
   const blocks = record.paras
-    .map((p) => ({ kind: p.kind, text: textOf(p) || "", boxes: p.boxes, fg: p.fg }))
-    .filter((b) => b.text.trim());
+    .map((p) => ({ kind: p.kind, text: textOf(p) || "", boxes: p.boxes, fg: p.fg, marks: p.words ? paraSource(page, p).marks : {} }))
+    .filter((b) => stripMarks(b.text).trim());
   if (post) broadcast({ type: "result", text: blocksToText(blocks), cached, fallbackModel, summary });
   if (!blocks.length) {
     broadcast({ type: "warn", text: "這一頁沒有可以畫的譯文。" });
@@ -825,8 +881,7 @@ async function prefetchNext(page) {
     return;
   }
   const next = { ...data.page, tabId: page.tabId, windowId: page.windowId };
-  const record = (await chrome.storage.session.get(recordKey(next)))[recordKey(next)];
-  if (record && (!record.paras.some((p) => p.source.trim()) || (await cachedTexts(next, record)))) {
+  if (await screenDone(next)) {
     log(`下一頁已經翻好（${describeScreen(next)}）`);
     return;
   }
@@ -961,7 +1016,7 @@ function bytesToBase64(bytes) {
 }
 
 function blocksToText(blocks) {
-  return blocks.map((b) => b.text).join("\n\n") || "（此頁無內文）";
+  return blocks.map((b) => stripMarks(b.text)).join("\n\n") || "（此頁無內文）";
 }
 
 const REFUSAL_CATEGORIES = {
@@ -1055,10 +1110,15 @@ function buildTextPrompt(targetLang, paras) {
 3. 看起來不是書本內文的雜訊（亂碼、閱讀器介面文字），text 留空字串。
 4. notes：如果有任何段落沒有翻譯（包括你決定不翻譯的），用一句話說明是哪些、為什麼；全部都有翻就留空字串。
 5. summarized：如果任何段落放的是摘要或改寫，而不是逐句翻譯，設為 true；否則 false。
-6. 譯文是中文時，引號用「」，引號裡面的引號用『』。
+6. 譯文是中文時，引號用「」，引號裡面的引號用『』。${paras.some((p) => hasMarks(p.text)) ? MARKS_RULE : ""}
 
 ${JSON.stringify(paras)}`;
 }
+
+// Added to the prompts only when some paragraph has style marks, so pages
+// without any are asked exactly as before.
+const MARKS_RULE = `
+7. 原文裡的 <i>…</i>（斜體）、<b>…</b>（粗體）、<h1>…</h1>、<h2>…</h2>（使用者畫的螢光標記）等標記，要在譯文裡包住意思對應的字。不要新增、刪除或改名標記，標記可以一層包一層，但不能交錯。`;
 
 const REVIEW_SCHEMA = {
   type: "object",
@@ -1086,7 +1146,7 @@ function buildReviewPrompt(targetLang, items) {
 3. 不要只為了換個說法而修改；意思正確、讀起來自然就保留初稿。
 4. 依上下文修正明顯的 OCR 錯字造成的誤譯。段落在頁首或頁尾被切斷時，只翻看得到的部分，不要補完。
 5. 譯文是中文時，引號用「」，引號裡面的引號用『』。
-6. notes：用一句話說明主要改了什麼；沒有修改就留空字串。
+6. notes：用一句話說明主要改了什麼；沒有修改就留空字串。${items.some((p) => hasMarks(p.source)) ? `\n7. 保留初稿裡的 <i>、<b>、<h1> 等標記；修改譯文時，把標記搬到意思對應的字上。不要新增、刪除或改名標記，標記不能交錯。` : ""}
 
 ${JSON.stringify(items)}`;
 }

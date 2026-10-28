@@ -223,7 +223,8 @@ test.describe("screens and cache keys", () => {
 
   test("cachedTexts: every paragraph with text cached, or null", async () => {
     const ext = startExtension({ panel: false });
-    const record = { paras: [{ start: 1, end: 5, source: "a" }, { start: 7, end: 9, source: "b" }, { start: 11, end: 12, source: "  " }] };
+    const w = (text) => ({ text, x0: 0, y0: 0, x1: 1, y1: 1, styles: [] });
+    const record = { paras: [{ start: 1, end: 5, words: [w("a")] }, { start: 7, end: 9, words: [w("b")] }, { start: 11, end: 12, words: [] }] };
     assert.equal(await ext.ctx.cachedTexts(page, record), null);
     await ext.ctx.cacheWrite({ "para:B0X:rev:1-5": { text: "甲" } });
     assert.equal(await ext.ctx.cachedTexts(page, record), null, "one is still missing");
@@ -256,6 +257,59 @@ test.describe("screens and cache keys", () => {
     const d = ctx.deferred();
     d.resolve(42);
     assert.equal(await d.promise, 42);
+  });
+});
+
+test.describe("paraSource", () => {
+  const ctx = worker();
+  const page = { key: "K", start: 1, asin: "B0X", revision: "r" };
+  const word = (text, x0, styles = []) => ({ text, x0, y0: 0, x1: x0 + 20, y1: 10, styles });
+  const para = { start: 100, end: 160, words: [word("read", 0), word("the", 30), word("Book", 60, ["i"]), word("of", 90, ["i"]), word("Tea", 120, ["i"])] };
+
+  test("plain words are joined; styled ones marked", () => {
+    assert.equal(ctx.paraSource(page, { ...para, words: para.words.map((w) => ({ ...w, styles: [] })) }).source, "read the Book of Tea");
+    assert.equal(ctx.paraSource(page, para).source, "read the <i>Book of Tea</i>");
+  });
+
+  test("without highlights: no highlight marks, and the plain cache key", () => {
+    const out = plain(ctx.paraSource(page, para));
+    assert.deepEqual(out.marks, {});
+    assert.equal(out.key, "para:B0X:r:100-160");
+  });
+
+  test("a highlight over some words: h1 around them, its colour, and a key that says so", () => {
+    const hl = { start: 120, end: 140, color: "rgb(1, 2, 3)", boxes: [{ x0: 28, y0: 0, x1: 85, y1: 10 }] };
+    const out = plain(ctx.paraSource({ ...page, highlights: [hl] }, para));
+    assert.equal(out.source, "read <h1>the <i>Book</i></h1> <i>of Tea</i>");
+    assert.deepEqual(out.marks, { h1: "rgb(1, 2, 3)" });
+    assert.match(out.key, /^para:B0X:r:100-160:h[0-9a-z]+$/);
+  });
+
+  test("the key changes with the highlight's range or colour, not with its order or boxes", () => {
+    const a = { start: 120, end: 140, color: "red", boxes: [{ x0: 28, y0: 0, x1: 50, y1: 10 }] };
+    const b = { start: 150, end: 155, color: "blue", boxes: [{ x0: 118, y0: 0, x1: 140, y1: 10 }] };
+    const key = (hls) => ctx.paraSource({ ...page, highlights: hls }, para).key;
+    assert.equal(key([a, b]), key([b, a]));
+    assert.equal(key([a]), key([{ ...a, boxes: [] }]));
+    assert.notEqual(key([a]), key([{ ...a, end: 141 }]));
+    assert.notEqual(key([a]), key([{ ...a, color: "green" }]));
+  });
+
+  test("two colours are h1 and h2 in the order they come; a highlight elsewhere is ignored", () => {
+    const hls = [
+      { start: 150, end: 155, color: "blue", boxes: [{ x0: 118, y0: 0, x1: 140, y1: 10 }] },
+      { start: 100, end: 105, color: "red", boxes: [{ x0: 0, y0: 0, x1: 20, y1: 10 }] },
+      { start: 900, end: 910, color: "green", boxes: [{ x0: 0, y0: 0, x1: 200, y1: 10 }] },
+    ];
+    const out = plain(ctx.paraSource({ ...page, highlights: hls }, para));
+    assert.deepEqual(out.marks, { h1: "blue", h2: "red" });
+    assert.equal(out.source, "<h2>read</h2> the <i>Book of</i> <h1><i>Tea</i></h1>");
+  });
+
+  test("hasText: a paragraph with words", () => {
+    assert.equal(ctx.hasText(para), true);
+    assert.equal(ctx.hasText({ words: [] }), false);
+    assert.equal(ctx.hasText({}), false);
   });
 });
 

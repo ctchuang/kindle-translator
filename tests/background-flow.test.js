@@ -886,6 +886,117 @@ test.describe("prefetching the next screen", () => {
   });
 });
 
+test.describe("styles and highlights", () => {
+  // Screen 0 of this book: a heading, then paragraphs; paragraph 1 has
+  // italic words 3–5 ("Book of Tea") and a bold word 7 ("the").
+  const styledBook = () =>
+    testBook({
+      paragraphs: [
+        { text: "Chapter One", heading: true },
+        { text: "she read the Book of Tea by the window and then went out", styles: { 3: "i", 4: "i", 5: "i", 7: "b" } },
+        ...Array.from({ length: 12 }, (_, i) => `plain paragraph number ${i} with some words in it.`),
+      ],
+    });
+  const promptOf = (req) => req.body.messages[0].content[0].text;
+
+  test("italic and bold words go to Claude marked, with the rule about marks", async () => {
+    const ext = startExtension({ book: styledBook() });
+    await showAndWait(ext, 0);
+    const sent = allSent(ext);
+    assert.ok(sent.includes("she read the <i>Book of Tea</i> by <b>the</b> window and then went out"), sent.join(" | "));
+    const withMarks = ext.claude.of("translate").find((r) => r.items.some((p) => p.text.includes("<i>")));
+    assert.match(promptOf(withMarks), /<i>…<\/i>（斜體）/);
+    const review = ext.claude.of("review").find((r) => r.items.some((p) => p.source.includes("<i>")));
+    assert.match(promptOf(review), /保留初稿裡的 <i>/);
+  });
+
+  test("requests without any marks are asked exactly as before", async () => {
+    const ext = startExtension();
+    await showAndWait(ext, 0);
+    for (const r of [...ext.claude.of("translate"), ...ext.claude.of("review")]) assert.doesNotMatch(promptOf(r), /標記/);
+  });
+
+  test("the translation keeps its marks into the overlay and the cache; the panel gets plain text", async () => {
+    const ext = startExtension({ book: styledBook() });
+    await showAndWait(ext, 0);
+    const block = ext.overlaysSent()[0].blocks.find((b) => b.text.includes("<i>"));
+    assert.equal(block.text, "譯：she read the <i>Book of Tea</i> by <b>the</b> window and then went out");
+    assert.deepEqual(block.marks, {});
+    assert.ok(Object.values(ext.session()).some((v) => v?.text === block.text));
+    assert.doesNotMatch(ext.msgs("result")[0].text, /<\/?[ibh]/);
+    assert.match(ext.msgs("result")[0].text, /Book of Tea/);
+  });
+
+  test("a translation with broken or invented marks keeps its words, without marks", async () => {
+    const ext = startExtension({
+      settings: { quality: "haiku" },
+      book: styledBook(),
+      claude: (req) =>
+        req.kind === "translate" && {
+          json: { translations: req.items.map((p) => ({ id: p.id, text: p.text.includes("<i>") ? "她讀了<i>茶之書" : p.text.includes("plain paragraph number 3") ? "<h1>亂加的</h1>" : `譯：${p.text}` })), notes: "", summarized: false },
+        },
+    });
+    await showAndWait(ext, 0);
+    const texts = ext.overlaysSent()[0].blocks.map((b) => b.text);
+    assert.ok(texts.includes("她讀了茶之書"));
+    assert.ok(!texts.some((t) => /<\/?[ibh]/.test(t) && !t.startsWith("譯：")));
+    assert.ok(ext.hasLog(/段譯文的樣式標記不完整，改用不帶樣式的譯文/));
+  });
+
+  test("a highlight marks its words with its own number, and its colour goes to the page", async () => {
+    const ext = startExtension({ book: styledBook() });
+    ext.tab.highlights = [ext.highlightOver(2, "rgb(255, 230, 100)")];
+    await showAndWait(ext, 0);
+    const marked = allSent(ext).find((t) => t.startsWith("<h1>"));
+    assert.equal(marked, `<h1>${ext.texts(0)[2]}</h1>`);
+    const block = ext.overlaysSent()[0].blocks.find((b) => b.text.includes("<h1>"));
+    assert.deepEqual(block.marks, { h1: "rgb(255, 230, 100)" });
+    assert.ok(ext.cachedParas().some((k) => /:h[0-9a-z]+$/.test(k)), "its cache key carries the highlight");
+  });
+
+  test("two highlight colours in one paragraph are h1 and h2", async () => {
+    const ext = startExtension({ book: styledBook() });
+    const a = ext.highlightOver(2, "rgb(255, 230, 100)");
+    const b = ext.highlightOver(2, "rgb(160, 200, 255)");
+    // The first half of the words yellow, the rest blue.
+    const half = Math.floor(a.boxes.length / 2);
+    ext.tab.highlights = [
+      { ...a, end: a.start + 5, boxes: a.boxes.slice(0, half) },
+      { ...b, start: a.start + 6, boxes: b.boxes.slice(half) },
+    ];
+    await showAndWait(ext, 0);
+    const marked = allSent(ext).find((t) => t.includes("<h2>"));
+    assert.match(marked, /^<h1>.*<\/h1> <h2>.*<\/h2>$/);
+    assert.deepEqual(ext.overlaysSent()[0].blocks.find((x) => x.text.includes("<h2>")).marks, { h1: "rgb(255, 230, 100)", h2: "rgb(160, 200, 255)" });
+  });
+
+  test("adding a highlight translates only that paragraph again; removing it needs no request", async () => {
+    const ext = startExtension({ book: styledBook() });
+    await showAndWait(ext, 0);
+    const before = ext.claude.of("translate").length;
+    await ext.setHighlights([ext.highlightOver(3)]);
+    await ext.idle();
+    assert.ok(ext.hasLog(/螢光標記改變了（位置 \d+–\d+，1 個）/));
+    const again = ext.claude.of("translate").slice(before).flatMap(sentTexts);
+    assert.deepEqual(again, [`<h1>${ext.texts(0)[3]}</h1>`], "only the highlighted paragraph");
+    assert.ok(ext.overlaysSent().at(-1).blocks.some((x) => x.text.includes("<h1>")));
+    const total = ext.claude.calls.length;
+    await ext.setHighlights([]);
+    await ext.idle();
+    assert.equal(ext.claude.calls.length, total, "the plain translation is still cached");
+    assert.ok(!ext.overlaysSent().at(-1).blocks.some((x) => x.text.includes("<h1>")));
+  });
+
+  test("a highlight outside every paragraph changes nothing", async () => {
+    const ext = startExtension({ book: styledBook() });
+    await showAndWait(ext, 0);
+    const calls = ext.claude.calls.length;
+    await ext.setHighlights([{ start: 999999, end: 1000010, color: "red", boxes: [{ x0: 0, y0: 0, x1: 1, y1: 1 }] }]);
+    await ext.idle();
+    assert.equal(ext.claude.calls.length, calls);
+  });
+});
+
 test.describe("vision engine (Opus reads the screenshot)", () => {
   const BLOCK = { kind: "paragraph", x0: 500, y0: 400, x1: 1500, y1: 600, lines: 3, text: "譯文一" };
   const vision = (json) => (req) => req.kind === "vision" && { json: { blocks: [BLOCK], notes: "", summarized: false, ...json } };
@@ -1101,7 +1212,7 @@ test.describe("talking to the page and the panel", () => {
     assert.ok(ext.hasLog(/頁面沒有 content script，重新注入/));
     assert.deepEqual(plain(ext.chrome._.executed), [
       { target: { tabId: 1, frameIds: [0] }, files: ["page-hook.js"], world: "MAIN" },
-      { target: { tabId: 1, frameIds: [0] }, files: ["page-render.js", "content.js"], world: "ISOLATED" },
+      { target: { tabId: 1, frameIds: [0] }, files: ["page-render.js", "styled-text.js", "content.js"], world: "ISOLATED" },
     ]);
     assert.equal(ext.overlaysSent().length, 1);
   });
@@ -1141,7 +1252,7 @@ test.describe("talking to the page and the panel", () => {
     assert.deepEqual(plain(behavior), { openPanelOnActionClick: true });
     assert.deepEqual(plain(ext.chrome._.executed), [
       { target: { tabId: 1 }, files: ["page-hook.js"], world: "MAIN" },
-      { target: { tabId: 1 }, files: ["page-render.js", "content.js"], world: "ISOLATED" },
+      { target: { tabId: 1 }, files: ["page-render.js", "styled-text.js", "content.js"], world: "ISOLATED" },
     ]);
   });
 

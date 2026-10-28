@@ -99,6 +99,17 @@ function boxOf(item) {
   return { x0: e + r.left * a, y0: f + r.top * d, x1: e + r.right * a, y1: f + r.bottom * d };
 }
 
+// Where a run's glyphs are, in page pixels. Runs of one line share the
+// line's origin, each glyph placed by its x position, so the run's own
+// extent comes from those (the last glyph as wide as the average step).
+function glyphSpan(run) {
+  const [a, , , d, e, f] = run.transform;
+  const xs = run.xPosition?.length ? run.xPosition : [0];
+  const n = xs.length;
+  const step = n > 1 ? (xs[n - 1] - xs[0]) / (n - 1) : run.fontSize * 0.6;
+  return { x0: e + a * xs[0], y0: f + run.rect.top * d, x1: e + a * (xs[n - 1] + step), y1: f + run.rect.bottom * d };
+}
+
 function runsOf(page) {
   return page.children.filter((c) => c.type === "run" && Array.isArray(c.glyphs));
 }
@@ -138,8 +149,9 @@ function cssColor(c, fallback = "#000000") {
 // Paragraphs of a screen, from the reader's own grouping: every run of one
 // element (a paragraph or heading of the book's source) is one paragraph.
 // Each: { id (elementId), start, end (position range on this screen), kind,
-// column, boxes (one per column it spans: { x0, y0, x1, y1, lines }), fg },
-// in reading order.
+// column, boxes (one per column it spans: { x0, y0, x1, y1, lines }), fg,
+// styleBoxes ({ styles: ["i", "b"], x0, y0, x1, y1 } for its italic or bold
+// runs) }, in reading order.
 function pageParagraphs(page) {
   const runs = runsOf(page);
   if (!runs.length) return [];
@@ -179,6 +191,16 @@ function pageParagraphs(page) {
     const size = mostGlyphs(rs, (r) => r.fontSize);
     const bold = mostGlyphs(rs, (r) => r.fontWeight >= 600);
     const fg = mostGlyphs(rs, (r) => r.textColor);
+    // Runs set apart from the rest of the paragraph: italic in a roman
+    // paragraph, bold in a regular one (docs/text-styles.md).
+    const italic = mostGlyphs(rs, (r) => r.fontStyle === "italic");
+    const styleBoxes = [];
+    for (const r of rs) {
+      const styles = [];
+      if (r.fontStyle === "italic" && !italic) styles.push("i");
+      if (r.fontWeight >= 600 && !bold) styles.push("b");
+      if (styles.length && r.glyphs.length) styleBoxes.push({ styles, ...glyphSpan(r) });
+    }
     out.push({
       id,
       start: Math.min(...rs.map((r) => r.startPositionId)),
@@ -187,6 +209,7 @@ function pageParagraphs(page) {
       column: Math.min(...perColumn.keys()),
       boxes,
       fg: cssColor(fg, cssColor(page.inkColor)),
+      styleBoxes,
     });
   }
   return out.sort((a, b) => a.start - b.start);
@@ -363,42 +386,6 @@ function screenAfter(pages, start) {
   return next;
 }
 
-// Split `text` into parts sized by `weights` (say, the lines a paragraph
-// has in each column), cutting at a space or punctuation near each share.
-function splitText(text, weights) {
-  const total = weights.reduce((s, w) => s + w, 0);
-  if (weights.length < 2 || !total) return [text, ...weights.slice(1).map(() => "")];
-  const chars = [...text];
-  const parts = [];
-  let from = 0;
-  let acc = 0;
-  for (let i = 0; i < weights.length - 1; i++) {
-    acc += weights[i];
-    const target = Math.round((chars.length * acc) / total);
-    // Look a few characters either way for a natural break.
-    let cut = target;
-    for (let d = 0; d <= 8; d++) {
-      if (isBreak(chars[target + d - 1])) {
-        cut = target + d;
-        break;
-      }
-      if (target - d > from && isBreak(chars[target - d - 1])) {
-        cut = target - d;
-        break;
-      }
-    }
-    cut = Math.min(chars.length, Math.max(from, cut));
-    parts.push(chars.slice(from, cut).join("").trim());
-    from = cut;
-  }
-  parts.push(chars.slice(from).join("").trim());
-  return parts;
-}
-
-function isBreak(ch) {
-  return ch !== undefined && /[\s，。、；：！？」』）,.;:!?)]/.test(ch);
-}
-
 if (typeof module !== "undefined") {
   module.exports = {
     RENDER_PATH_RE,
@@ -409,6 +396,7 @@ if (typeof module !== "undefined") {
     layoutOf,
     parseRender,
     boxOf,
+    glyphSpan,
     pageColumns,
     cssColor,
     pageParagraphs,
@@ -420,6 +408,5 @@ if (typeof module !== "undefined") {
     maskedShare,
     identifyScreen,
     screenAfter,
-    splitText,
   };
 }

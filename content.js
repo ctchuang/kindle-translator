@@ -14,6 +14,12 @@ window.__kindleTranslatorLoaded = true;
 const RENDER_MSG = "kindle-translator-render";
 const DEV_CAPTURE = "kindle-translator-dev-capture";
 const PAGE_IMG = ".kg-full-page-img img";
+// The reader's highlights: one element per word (and space) over the page
+// image, its class naming the highlight's position range ("24751/24817").
+const HIGHLIGHT = ".kg-client-highlight";
+// Italic translations: Chinese fonts rarely have italics, and Chinese books
+// set such words in a kai face instead.
+const KAI = '"BiauKai","Kaiti TC","STKaiti","KaiTi","Noto Serif TC",serif';
 // Layouts (font size, theme, window size…) kept at once, and screens per
 // layout: changing a setting starts a new layout, and the reader keeps a
 // dozen screens or so around the one it shows.
@@ -93,13 +99,20 @@ function checkImage() {
   if (src) identify();
 }
 
+// Resolves the wait of the identification under way when a newer one starts:
+// its image may have been replaced and never fire "load".
+let giveWay = () => {};
+
 function identify() {
+  giveWay();
   const mine = ++latest;
+  const superseded = new Promise((resolve) => (giveWay = resolve));
   identifying = (async () => {
     const img = pageImage();
     if (!img) return;
     try {
-      await loaded(img);
+      await Promise.race([loaded(img), superseded]);
+      if (mine !== latest) return;
       const found = await findScreen(img);
       if (mine !== latest) return;
       if (!found) {
@@ -108,6 +121,7 @@ function identify() {
         return;
       }
       shown = screenInfo(found.layout, found.page);
+      shown.highlights = readHighlights(shown);
       failed = null;
       report({ page: shown, tried: found.tried, ms: found.ms });
     } catch (err) {
@@ -180,6 +194,54 @@ function screenInfo(layout, page) {
   };
 }
 
+// The highlights on show, in page pixels: [{ start, end, color, boxes }], the
+// colour as the reader paints it.
+function readHighlights(page) {
+  const img = pageImage();
+  if (!img || !page) return [];
+  const r = img.getBoundingClientRect();
+  if (!(r.width > 0) || !(r.height > 0)) return [];
+  const sx = page.width / r.width;
+  const sy = page.height / r.height;
+  const found = new Map();
+  for (const el of document.querySelectorAll(HIGHLIGHT)) {
+    const range = String(el.className).split(/\s+/).map((c) => /^(\d+)\/(\d+)$/.exec(c)).find(Boolean);
+    if (!range) continue;
+    const color = getComputedStyle(el).backgroundColor || "";
+    const key = `${range[1]}/${range[2]}|${color}`;
+    if (!found.has(key)) found.set(key, { start: Number(range[1]), end: Number(range[2]), color, boxes: [] });
+    const b = el.getBoundingClientRect();
+    if (b.width > 0 && b.height > 0) {
+      found.get(key).boxes.push({ x0: (b.left - r.left) * sx, y0: (b.top - r.top) * sy, x1: (b.right - r.left) * sx, y1: (b.bottom - r.top) * sy });
+    }
+  }
+  return [...found.values()].filter((h) => h.boxes.length);
+}
+
+function highlightsKey(list) {
+  return JSON.stringify((list || []).map((h) => [h.start, h.end, h.color]).sort());
+}
+
+// The reader draws highlights after the page, and the user adds and removes
+// them: report the screen again when they change, so the translation follows.
+// Adding one, the reader removes every highlight and draws them all again, so
+// wait for them to settle rather than report "none" in between.
+const HIGHLIGHT_SETTLE_MS = 300;
+let highlightTimer = null;
+
+function scheduleHighlightCheck() {
+  clearTimeout(highlightTimer);
+  highlightTimer = setTimeout(checkHighlights, HIGHLIGHT_SETTLE_MS);
+}
+
+function checkHighlights() {
+  if (!shown) return;
+  const now = readHighlights(shown);
+  if (highlightsKey(now) === highlightsKey(shown.highlights)) return;
+  shown = { ...shown, highlights: now };
+  report({ page: shown, highlights: true });
+}
+
 function report(msg) {
   // Reloading the extension leaves this script running but cut off.
   if (!chrome.runtime?.id) return;
@@ -190,6 +252,17 @@ function report(msg) {
 function pageLog(text) {
   if (!chrome.runtime?.id) return;
   chrome.runtime.sendMessage({ type: "pageLog", text }).catch(() => {});
+}
+
+// The screen on show, once any identification under way (even one that
+// started while waiting) is done.
+async function currentPage() {
+  let waited;
+  do {
+    waited = identifying;
+    await waited;
+  } while (waited !== identifying);
+  return shown ? { page: shown } : { error: failed || "還不知道目前是哪一頁" };
 }
 
 // What the background needs to translate a screen: where its paragraphs
@@ -341,12 +414,13 @@ function overlayBoxes(msg) {
   const sy = r.height / msg.size.height;
   const out = [];
   for (const b of msg.blocks) {
-    const parts = splitText(b.text, b.boxes.map((x) => x.lines || 1));
+    const parts = splitMarked(b.text, b.boxes.map((x) => x.lines || 1));
     b.boxes.forEach((box, i) => {
-      if (!parts[i]) return;
+      if (!parts[i]?.length) return;
       out.push({
         kind: b.kind,
-        text: parts[i],
+        segments: parts[i],
+        marks: b.marks || {},
         lines: box.lines || 1,
         bg: msg.bg,
         fg: b.fg,
@@ -427,7 +501,7 @@ function showOverlay(blocks) {
       // if it doesn't fit, fitText shrinks it instead of wrapping.
       ...(single && { display: "flex", alignItems: "center", textAlign: "left", whiteSpace: "pre" }),
     });
-    box.textContent = b.text;
+    appendSegments(box, b.segments, b.marks);
     el.append(box);
     boxes.push({ box, kind: b.kind, single, fit: fitText(box) });
   });
@@ -441,6 +515,26 @@ function showOverlay(blocks) {
   const fits = voters.map((b) => b.fit).sort((a, b) => a - b);
   const median = fits[fits.length >> 1];
   for (const b of bodyBoxes) b.box.style.fontSize = `${Math.min(b.fit, median)}px`;
+}
+
+// A translation's segments ({ text, styles }) as text nodes and spans:
+// italics in a kai face, bold, highlights on the reader's highlight colour.
+// Built from text nodes, never parsed as HTML.
+function appendSegments(box, segments, marks) {
+  for (const seg of segments) {
+    if (!seg.styles.length) {
+      box.append(seg.text);
+      continue;
+    }
+    const span = document.createElement("span");
+    for (const s of seg.styles) {
+      if (s === "i") span.style.fontFamily = KAI;
+      else if (s === "b") span.style.fontWeight = "700";
+      else if (marks[s]) span.style.background = marks[s];
+    }
+    span.textContent = seg.text;
+    box.append(span);
+  }
 }
 
 // Blank space above and below block i: halfway to the nearest block in the
@@ -533,6 +627,7 @@ if (window.top === window) {
   new MutationObserver((mutations) => {
     if (mutations.every((m) => isOverlayNode(m.target))) return;
     checkImage();
+    if (shown) scheduleHighlightCheck();
   }).observe(document.documentElement, { subtree: true, childList: true, attributes: true, attributeFilter: ["src"] });
 
   // The page image moves with the window; keep the boxes over it.
@@ -567,7 +662,7 @@ if (window.top === window) {
         sendResponse({ shown: enabled && !!root?.childElementCount });
         return;
       case "currentPage":
-        identifying.then(() => sendResponse(shown ? { page: shown } : { error: failed || "還不知道目前是哪一頁" }));
+        currentPage().then(sendResponse);
         return true;
       case "pageData":
         pageData(msg).then(sendResponse, (err) => sendResponse({ error: String(err?.message || err) }));

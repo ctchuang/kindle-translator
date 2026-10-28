@@ -8,9 +8,10 @@ const { createChrome } = require("./helpers/chrome");
 
 const IMAGE = "data:image/png;base64,iVBORw0KGgo=";
 
-// A Tesseract line as recognize() reports it with { blocks: true }.
-function tLine(text, bbox, confidence = 91) {
-  return { text, confidence, bbox, words: [{ bbox }] };
+// A Tesseract line as recognize() reports it with { blocks: true }: one word
+// the size of the line, unless `words` are given.
+function tLine(text, bbox, confidence = 91, words = [{ text, bbox }]) {
+  return { text, confidence, bbox, words };
 }
 
 // Tesseract.createWorker; `pages(rectangle, n)` gives recognize()'s data.
@@ -85,12 +86,12 @@ test("an OCR request answers asynchronously with each column's lines", async () 
   assert.deepEqual(res, {
     columns: [
       [
-        { x0: 10, y0: 20, x1: 300, y1: 40, text: "first 0", confidence: 91 },
-        { x0: 10, y0: 50, x1: 200, y1: 70, text: "second", confidence: 77 },
+        { x0: 10, y0: 20, x1: 300, y1: 40, text: "first 0", confidence: 91, words: [{ x0: 10, y0: 20, x1: 300, y1: 40, text: "first 0" }] },
+        { x0: 10, y0: 50, x1: 200, y1: 70, text: "second", confidence: 77, words: [{ x0: 10, y0: 50, x1: 200, y1: 70, text: "second" }] },
       ],
       [
-        { x0: 1010, y0: 20, x1: 1300, y1: 40, text: "first 1000", confidence: 91 },
-        { x0: 1010, y0: 50, x1: 1200, y1: 70, text: "second", confidence: 77 },
+        { x0: 1010, y0: 20, x1: 1300, y1: 40, text: "first 1000", confidence: 91, words: [{ x0: 1010, y0: 20, x1: 1300, y1: 40, text: "first 1000" }] },
+        { x0: 1010, y0: 50, x1: 1200, y1: 70, text: "second", confidence: 77, words: [{ x0: 1010, y0: 50, x1: 1200, y1: 70, text: "second" }] },
       ],
     ],
   });
@@ -114,6 +115,33 @@ test("lines from every block and paragraph, in order", async () => {
     res.columns[0].map((l) => l.text),
     ["a", "b", "c"]
   );
+});
+
+test("each line's words come back with their boxes; a line without words gives none", async () => {
+  const pages = () => ({
+    blocks: [
+      {
+        paragraphs: [
+          {
+            lines: [
+              tLine("two words", { x0: 0, y0: 0, x1: 100, y1: 10 }, 90, [
+                { text: "two", bbox: { x0: 0, y0: 0, x1: 40, y1: 10 } },
+                { text: "words", bbox: { x0: 50, y0: 0, x1: 100, y1: 10 } },
+              ]),
+              { text: "no words field", confidence: 90, bbox: { x0: 0, y0: 20, x1: 30, y1: 30 } },
+            ],
+          },
+        ],
+      },
+    ],
+  });
+  const { send } = setup({ tesseract: fakeTesseract({ pages }) });
+  const res = plain(await send({ target: "offscreen", image: IMAGE, rects: [RECTS[0]] }).done);
+  assert.deepEqual(res.columns[0][0].words, [
+    { x0: 0, y0: 0, x1: 40, y1: 10, text: "two" },
+    { x0: 50, y0: 0, x1: 100, y1: 10, text: "words" },
+  ]);
+  assert.deepEqual(res.columns[0][1].words, []);
 });
 
 test("a page with no text blocks gives empty columns", async () => {

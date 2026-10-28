@@ -52,12 +52,16 @@ Translations are kept per paragraph, by the paragraph's position in the book, wh
 - The only server contacted is api.anthropic.com. The API key is kept in Chrome sync storage. The reader's page data is used inside the page to recognise and draw the current and next page, and is never sent anywhere.
 - Claude occasionally returns a summary instead of a translation, citing copyright. A summary triggers one automatic retry; if it is still a summary it is shown and labelled 「摘要」 (summary), but not cached.
 - Positions are per paragraph, not per line; a paragraph running from the left page into the right one gets its translation split in two by line count.
-- The translation boxes cover the page's highlights, and the original text under them. To add a highlight, switch to the original first (the bottom-right button or Alt+O), select the text and highlight it, then switch back to the translation.
+- Italics in the original are set in a kai face in the translation, bold words stay bold, and the page's highlights mark the matching words of the translation in the same colour. Not in vision mode.
+- The translation boxes cover the original text under them. To add a highlight, switch to the original first (the bottom-right button or Alt+O), select the text and highlight it, then switch back to the translation; that paragraph is translated again with the highlight.
 - The extension depends on Kindle Cloud Reader's unpublished page data format; if Amazon changes it, pages won't be recognised and the side panel will say so.
 - This translates page by page for your own reading. Don't use it to export book content in bulk; that violates Amazon's terms of use.
 
 ## Release notes
 
+- **2.1.0**: keeps the original's text styles and highlights.
+  - Italic words are set in a kai face in the translation; bold words within a paragraph stay bold.
+  - The page's highlights mark the matching words of the translation in the same colour; adding or removing one translates just that paragraph again.
 - **2.0.2**:
   - Fixed pages with shaded boxes or links (as in technical books) not being recognised: the shaded boxes are drawn from the page data, and box edges and link underlines are left out of the comparison.
   - The translation no longer covers the reader's toolbar and settings panel.
@@ -115,7 +119,8 @@ The detailed design (in Chinese) is in [docs/design.md](docs/design.md).
 - `page-render.js`: unpacks the page data, draws pages from it, compares pixels, finds paragraphs and columns
 - `content.js`: keeps the page data on the Kindle page, recognises the page on screen, and draws the translation overlay
 - `background.js`: decides which page to translate, Claude API calls (structured outputs), the paragraph cache, translating ahead, the vision mode's screenshot
-- `ocr-layout.js`: puts OCR lines into paragraphs
+- `ocr-layout.js`: puts OCR lines and words into paragraphs, with each word's style
+- `styled-text.js`: handles translations with italics, bold and highlights
 - `offscreen.html/js`: runs Tesseract in an offscreen document (a service worker can't start a Web Worker)
 - `sidepanel.html/js`: side panel UI
 - `options.html/js`: options page (API key, translation mode, translate ahead, effort, target language)
