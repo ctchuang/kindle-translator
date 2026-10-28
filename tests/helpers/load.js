@@ -25,7 +25,13 @@ function scaled(fn, scale) {
 const FastAbortSignal = {
   any: (signals) => AbortSignal.any(signals),
   abort: (reason) => AbortSignal.abort(reason),
-  timeout: (ms) => AbortSignal.timeout(Math.max(1, ms / ABORT_TIMEOUT_SCALE)),
+  // Not AbortSignal.timeout itself: its timer doesn't keep the event loop
+  // alive, and on Node 22 a test waiting only on it ends as "still pending".
+  timeout: (ms) => {
+    const controller = new AbortController();
+    setTimeout(() => controller.abort(new DOMException("The operation was aborted due to timeout", "TimeoutError")), Math.max(1, ms / ABORT_TIMEOUT_SCALE));
+    return controller.signal;
+  },
 };
 
 function source(file) {
