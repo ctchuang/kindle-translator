@@ -8,6 +8,6 @@
 
 例如只有字首是斜體（*reason*ing）。決定整個字都算有樣式。目前字的樣式看的是字的中心點落在哪裡，只有一部分有樣式的字可能沒被標到；之後在對到 OCR 的字時（[text-styles.md](docs/text-styles.md) §3.2）改成只要字有一部分落在範圍裡就算。
 
-## 校對時參考前面的頁
+## 校對時參考前面的頁：本機實測
 
-把同一本書最近翻過的頁（原文、譯文和頁碼）送給 Sonnet 校對當參考，統一人名、用語和語氣。設計、成本估算和工作分解見 [docs/reference-pages.md](docs/reference-pages.md)。
+2.2.0 已實作（預設關閉），還要在實際的 Kindle Cloud Reader 上比較開和關的品質，並從執行紀錄確認 prompt cache 有命中。待辦清單見 [docs/reference-pages.md](docs/reference-pages.md) §7。

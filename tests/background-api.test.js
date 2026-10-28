@@ -80,7 +80,14 @@ test("logs usage from the stream", async () => {
   const ext = startExtension({ claude: () => ({ usage: { start: { input_tokens: 1234 }, end: { output_tokens: 56 } } }) });
   await call(ext);
   await ext.tick();
-  assert.ok(ext.hasLog(/tokens 輸入 1234 \/ 輸出 56/));
+  assert.ok(ext.hasLog(/tokens 輸入 1234 \/ 輸出 56$/));
+});
+
+test("logs prompt-cache reads and writes when there are any", async () => {
+  const ext = startExtension({ claude: () => ({ usage: { start: { input_tokens: 80, cache_read_input_tokens: 4000, cache_creation_input_tokens: 600 } } }) });
+  await call(ext);
+  await ext.tick();
+  assert.ok(ext.hasLog(/tokens 輸入 80 \/ 輸出 50，快取讀 4000 \/ 寫 600/));
 });
 
 test("a log tag prefixes every line of a call", async () => {

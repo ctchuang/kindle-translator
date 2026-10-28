@@ -9,7 +9,7 @@
 // - "vision": Opus reads a screenshot and translates it in one call.
 // See docs/design.md and docs/page-pipeline-v2.md.
 
-importScripts("ocr-layout.js", "styled-text.js");
+importScripts("ocr-layout.js", "styled-text.js", "context-pages.js");
 
 // Vision engine: only Opus. In testing, Sonnet 5.5 and Haiku 5.5 declined to
 // translate screenshots of Kindle book pages (citing copyright).
@@ -47,6 +47,8 @@ const DEFAULTS = {
   effort: "low",
   autoTranslate: true,
   prefetch: true,
+  referencePages: false,
+  referenceTokens: 16000,
   targetLang: "繁體中文（台灣用語）",
   overlay: true,
 };
@@ -265,6 +267,83 @@ async function drawFromCache(page, settings, { post = true } = {}) {
   await draw(page, record, (p) => texts.get(paraSource(page, p).key), { cached: true, post });
   return true;
 }
+
+// ---- Reference pages ----
+
+// With the options page's switch on, the paragraphs drawn on screen (source
+// and final translation) are kept per book in local storage for a week, and
+// the review is sent the ones before its page (context-pages.js). Index:
+// refBooks = { "ref:<asin>:<revision>": last saved }, so books not read for
+// a week are dropped too.
+let refChain = Promise.resolve(); // one read-modify-write at a time
+
+function refKey(page) {
+  return `ref:${page.asin}:${page.revision}`;
+}
+
+function refUpdate(page, change) {
+  const run = refChain.then(async () => {
+    const key = refKey(page);
+    const now = Date.now();
+    const { [key]: book = { paras: [], refStart: null }, refBooks = {} } = await chrome.storage.local.get([key, "refBooks"]);
+    const out = change(book, now);
+    const stale = Object.keys(refBooks).filter((k) => k !== key && now - refBooks[k] > REF_MAX_AGE_MS);
+    for (const k of stale) delete refBooks[k];
+    if (stale.length) await chrome.storage.local.remove(stale);
+    await chrome.storage.local.set({ [key]: book, refBooks: { ...refBooks, [key]: now } });
+    return out;
+  });
+  refChain = run.catch(() => {});
+  return run;
+}
+
+// Keep the paragraphs of a screen just drawn (OCR engine only).
+async function saveReference(page, record, textOf) {
+  if (!page.asin) return;
+  const paras = record.paras
+    .filter(hasText)
+    .map((p) => ({ start: p.start, end: p.end, source: paraSource(page, p).source, text: textOf(p) || "" }))
+    .filter((p) => stripMarks(p.text).trim());
+  if (!paras.length) return;
+  await refUpdate(page, (book, now) => {
+    book.paras = mergeParas(book.paras, paras, now);
+  });
+}
+
+// The content blocks that put the book's earlier paragraphs before the
+// review prompt, or null (logged why) when there are none to send. Cache
+// breakpoints go on the last closed block, which stays the same until the
+// set is trimmed, and on the last block.
+async function referenceContent(settings, page, tag) {
+  if (!page?.asin) {
+    log(`${tag}校對沒有參考前面的頁：不知道是哪一本書`);
+    return null;
+  }
+  const max = Math.min(100_000, Math.max(2000, Number(settings.referenceTokens) || DEFAULTS.referenceTokens));
+  const pick = await refUpdate(page, (book) => {
+    const pick = pickReference(book.paras, page.start, book.refStart, max);
+    book.refStart = pick.refStart;
+    return pick;
+  });
+  if (!pick.paras.length) {
+    log(`${tag}校對沒有參考前面的頁：這本書在${describeScreen(page)}之前還沒有翻過的段落`);
+    return null;
+  }
+  const how = pick.trimmed ? "，超過上限，丟掉較舊的一半" : pick.reset ? "，重新起算" : "";
+  log(`${tag}校對參考前面的頁：${pick.paras.length} 段（位置 ${pick.paras[0].start}–${pick.paras.at(-1).end}），約 ${pick.tokens} tokens${how}`);
+  const blocks = referenceBlocks(pick.paras);
+  const lastFull = blocks.findLastIndex((b) => b.full);
+  return [
+    { type: "text", text: REFERENCE_INTRO },
+    ...blocks.map((b, i) => ({
+      type: "text",
+      text: b.text,
+      ...((i === lastFull || i === blocks.length - 1) && { cache_control: { type: "ephemeral" } }),
+    })),
+  ];
+}
+
+const REFERENCE_INTRO = "以下是同一本書在這一頁之前、使用者已經讀過的段落，依書中的順序排列，每行一段：source 是原文，text 是已經定稿的譯文。這些段落只供參考，用來統一人名、專有名詞、稱呼和語氣。";
 
 chrome.runtime.onInstalled.addListener(() => {
   chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: true });
@@ -722,7 +801,7 @@ async function translateRecord(job, record, settings) {
     let got = null;
     try {
       if (send.length) {
-        got = await requestTranslations(settings, send, job.controller.signal);
+        got = await requestTranslations(settings, send, job.controller.signal, page);
         out.sent += send.length;
         out.notes = [out.notes, got.notes].filter(Boolean).join(" ");
         out.fallbackModel ??= got.fallbackModel;
@@ -754,11 +833,12 @@ async function translateRecord(job, record, settings) {
   return out;
 }
 
-// Translate paragraphs ({ source, column }) with the configured quality
-// level, retrying a summary. Resolves to { texts (by index), notes,
-// fallbackModel, summary }. A translation whose style marks don't hold up
-// (unpaired, crossed, or not in its source) keeps its words without them.
-async function requestTranslations(settings, paras, jobSignal) {
+// Translate paragraphs ({ source, column }) of the screen `page` with the
+// configured quality level, retrying a summary. Resolves to { texts (by
+// index), notes, fallbackModel, summary }. A translation whose style marks
+// don't hold up (unpaired, crossed, or not in its source) keeps its words
+// without them.
+async function requestTranslations(settings, paras, jobSignal, page) {
   const plan = qualityOf(settings);
   const items = paras.map((p, id) => ({ id, text: p.source }));
   const chunks = splitParas(items, paras);
@@ -769,14 +849,10 @@ async function requestTranslations(settings, paras, jobSignal) {
     const signal = AbortSignal.any([jobSignal, failed.signal]);
     let outs;
     try {
-      outs = await Promise.all(
-        chunks.map(async (chunk, i) => {
-          const tag = chunks.length > 1 ? `[${i + 1}/${chunks.length}] ` : "";
-          const draft = await translateChunk(settings, chunk, tag, signal);
-          // An Opus fallback's translation doesn't need a Sonnet review.
-          return plan.review && !draft.byOpus ? reviewChunk(settings, plan.review, chunk, draft, tag, signal) : draft;
-        })
-      );
+      // Drafts side by side, then one review of the whole screen: it only
+      // outputs what it changes, so splitting it would save little time.
+      const drafts = await Promise.all(chunks.map((chunk, i) => translateChunk(settings, chunk, chunks.length > 1 ? `[${i + 1}/${chunks.length}] ` : "", signal)));
+      outs = plan.review ? await reviewDrafts(settings, plan.review, chunks, drafts, signal, page) : drafts;
     } catch (err) {
       failed.abort(); // don't leave the other calls running
       throw err;
@@ -827,6 +903,10 @@ async function draw(page, record, textOf, { cached = false, post = true, fallbac
   if (settings.overlay) await showOnPage(page, record, blocks);
   else log("覆蓋層開關已關閉，譯文只顯示在側邊欄");
   await setDrawn(page);
+  // What the reader has seen, as the reference for later pages' reviews.
+  if (settings.referencePages && settings.engine !== "vision" && !summary) {
+    await saveReference(page, record, textOf).catch((err) => log(`參考頁沒有存下來：${err.message || err}`));
+  }
   schedulePrefetch(page);
 }
 
@@ -1120,6 +1200,9 @@ ${JSON.stringify(paras)}`;
 const MARKS_RULE = `
 7. 原文裡的 <i>…</i>（斜體）、<b>…</b>（粗體）、<h1>…</h1>、<h2>…</h2>（使用者畫的螢光標記）等標記，要在譯文裡包住意思對應的字。不要新增、刪除或改名標記，標記可以一層包一層，但不能交錯。`;
 
+// Added to the review prompt when the book's earlier paragraphs come first.
+const REFERENCE_RULE = "前面的參考段落是同一本書較早的部分，已經定稿：人名、專有名詞、稱呼和語氣跟參考段落不一致時，改成跟參考段落一致（參考段落本身有明顯錯誤時除外）。不要修改或翻譯參考段落，corrections 只能列下面輸入裡的 id。這一頁的意思以這一頁的原文為準，不要用參考段落補完這一頁被切斷的段落。";
+
 const REVIEW_SCHEMA = {
   type: "object",
   properties: {
@@ -1138,7 +1221,10 @@ const REVIEW_SCHEMA = {
   additionalProperties: false,
 };
 
-function buildReviewPrompt(targetLang, items) {
+function buildReviewPrompt(targetLang, items, withReference = false) {
+  const rules = [];
+  if (items.some((p) => hasMarks(p.source))) rules.push("保留初稿裡的 <i>、<b>、<h1> 等標記；修改譯文時，把標記搬到意思對應的字上。不要新增、刪除或改名標記，標記不能交錯。");
+  if (withReference) rules.push(REFERENCE_RULE);
   return `以下是使用者正在閱讀的一本已出版的書目前這一頁的文字（由 OCR 從書頁圖片辨識，可能有少量辨識錯誤），以及另一個模型翻成${targetLang}的初稿。請校對初稿給使用者閱讀。
 輸入是 JSON 陣列，每個元素是一段：id、source（原文）、draft（初稿譯文）。
 1. 檢查誤譯、漏譯、語意不清、不通順或不像${targetLang}的說法，以及同一頁人名、用語前後不一致。
@@ -1146,7 +1232,7 @@ function buildReviewPrompt(targetLang, items) {
 3. 不要只為了換個說法而修改；意思正確、讀起來自然就保留初稿。
 4. 依上下文修正明顯的 OCR 錯字造成的誤譯。段落在頁首或頁尾被切斷時，只翻看得到的部分，不要補完。
 5. 譯文是中文時，引號用「」，引號裡面的引號用『』。
-6. notes：用一句話說明主要改了什麼；沒有修改就留空字串。${items.some((p) => hasMarks(p.source)) ? `\n7. 保留初稿裡的 <i>、<b>、<h1> 等標記；修改譯文時，把標記搬到意思對應的字上。不要新增、刪除或改名標記，標記不能交錯。` : ""}
+6. notes：用一句話說明主要改了什麼；沒有修改就留空字串。${rules.map((r, i) => `\n${7 + i}. ${r}`).join("")}
 
 ${JSON.stringify(items)}`;
 }
@@ -1195,14 +1281,33 @@ function qualityOf(settings) {
   return QUALITY[settings.quality] ?? QUALITY[DEFAULTS.quality];
 }
 
-// Apply `model`'s corrections to a chunk's draft. A failed or declined review
-// keeps the draft: it's already a usable translation.
-async function reviewChunk(settings, model, chunk, draft, tag, signal) {
+// Review the drafts of a screen's chunks in one request. An Opus fallback's
+// translation isn't reviewed.
+async function reviewDrafts(settings, model, chunks, drafts, signal, page) {
+  const mine = drafts.map((d) => !d.byOpus);
+  if (!mine.includes(true)) return drafts;
+  const chunk = chunks.filter((c, i) => mine[i]).flat();
+  const merged = { translations: drafts.filter((d, i) => mine[i]).flatMap((d) => d.translations || []) };
+  const reviewed = new Map((await reviewChunk(settings, model, chunk, merged, "", signal, page)).translations.map((t) => [t.id, t.text]));
+  return drafts.map((d, i) => (mine[i] ? { ...d, translations: (d.translations || []).map((t) => ({ ...t, text: reviewed.get(t.id) ?? t.text })) } : d));
+}
+
+// Apply `model`'s corrections to a draft. A failed or declined review keeps
+// the draft: it's already a usable translation. With the reference switch
+// on, the book's earlier paragraphs go first (see referenceContent).
+async function reviewChunk(settings, model, chunk, draft, tag, signal, page) {
   const texts = new Map((draft.translations || []).map((t) => [t.id, t.text]));
   const items = chunk
     .map((p) => ({ id: p.id, source: p.text, draft: texts.get(p.id) || "" }))
     .filter((p) => p.draft.trim()); // noise the draft left blank
   if (!items.length) return draft;
+  // A reference that can't be read only costs the consistency, not the review.
+  const reference = settings.referencePages
+    ? await referenceContent(settings, page, tag).catch((err) => {
+        log(`${tag}校對沒有參考前面的頁：讀不到存下的段落（${err.message || err}）`);
+        return null;
+      })
+    : null;
   const started = Date.now();
   let out;
   try {
@@ -1213,7 +1318,7 @@ async function reviewChunk(settings, model, chunk, draft, tag, signal) {
       effort: "low",
       thinking: TEXT_MODELS[model],
       schema: REVIEW_SCHEMA,
-      content: [{ type: "text", text: buildReviewPrompt(settings.targetLang, items) }],
+      content: [...(reference || []), { type: "text", text: buildReviewPrompt(settings.targetLang, items, !!reference) }],
     });
   } catch (err) {
     if (err.name === "AbortError") throw err;
@@ -1318,7 +1423,8 @@ async function callClaude(settings, { model, effort, thinking, fallbacks, schema
   log(
     `回應結束：${seconds(started)} 秒，` +
       `stop_reason ${body.stop_reason ?? "-"}，模型 ${body.model ?? "-"}，` +
-      `tokens 輸入 ${u.input_tokens ?? "-"} / 輸出 ${u.output_tokens ?? "-"}`
+      `tokens 輸入 ${u.input_tokens ?? "-"} / 輸出 ${u.output_tokens ?? "-"}` +
+      (u.cache_read_input_tokens || u.cache_creation_input_tokens ? `，快取讀 ${u.cache_read_input_tokens ?? 0} / 寫 ${u.cache_creation_input_tokens ?? 0}` : "")
   );
   if (!res.ok) {
     const msg = body?.error?.message || res.statusText;

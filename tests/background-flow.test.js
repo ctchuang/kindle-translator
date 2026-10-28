@@ -8,6 +8,7 @@ const assert = require("node:assert/strict");
 const { plain, waitFor } = require("./helpers/load");
 const { startExtension, testBook } = require("./helpers/extension");
 const R = require("../page-render.js");
+const C = require("../context-pages.js");
 
 function deferred() {
   let resolve;
@@ -39,11 +40,12 @@ test.describe("a screen shown is translated (OCR engine, polished mode)", () => 
     ]);
     assert.equal(ext.chrome._.offscreenCreated, 1);
 
-    // Haiku per column, Sonnet per chunk.
+    // Haiku per column, Sonnet once for the whole screen.
     const tr = ext.claude.of("translate");
     const rv = ext.claude.of("review");
     assert.equal(tr.length, 2, "the two columns translated side by side");
-    assert.equal(rv.length, 2);
+    assert.equal(rv.length, 1, "one review of both drafts");
+    assert.equal(rv[0].items.length, texts.length);
     for (const r of tr) {
       assert.equal(r.body.model, "claude-haiku-5-5");
       assert.deepEqual(r.body.thinking, { type: "disabled" });
@@ -166,7 +168,7 @@ test.describe("a screen shown is translated (OCR engine, polished mode)", () => 
   test("an unknown quality level falls back to the polished mode", async () => {
     const ext = startExtension({ settings: { quality: "nonsense" } });
     await showAndWait(ext, 0);
-    assert.equal(ext.claude.of("review").length, 2);
+    assert.equal(ext.claude.of("review").length, 1);
   });
 
   test("a screen with few paragraphs goes in one request", async () => {
@@ -1408,5 +1410,135 @@ test.describe("page data asked for by a test tool", () => {
     const done2 = new Promise((r) => (reply2 = r));
     ext.chrome.runtime.onMessage.dispatch({ type: "devCapture", name: "p" }, { tab: { ...ext.chrome._.activeTab } }, reply2);
     assert.deepEqual(plain(await done2), { ok: false, error: "storage gone" });
+  });
+});
+
+test.describe("reference pages (the review sees the book's earlier paragraphs)", () => {
+  const REF = { referencePages: true };
+  const refBlocks = (req) => req.body.messages[0].content.slice(0, -1);
+  const refParas = (req) =>
+    refBlocks(req)
+      .slice(1)
+      .flatMap((b) => b.text.split("\n").map((l) => JSON.parse(l)));
+  const stored = (ext) => plain(ext.chrome.storage.local.data.get("ref:B0TESTBOOK:rev1"));
+
+  test("off by default: nothing kept, the review is the prompt alone", async () => {
+    const ext = startExtension();
+    await showAndWait(ext, 0);
+    await showAndWait(ext, 1);
+    assert.equal(ext.chrome.storage.local.data.size, 0);
+    for (const r of ext.claude.of("review")) assert.equal(r.body.messages[0].content.length, 1);
+    assert.ok(!ext.hasLog(/參考前面的頁/));
+  });
+
+  test("reading on, each review carries the paragraphs drawn before it", async () => {
+    const ext = startExtension({ settings: REF });
+    await showAndWait(ext, 0);
+    const [first] = ext.claude.of("review");
+    assert.equal(first.body.messages[0].content.length, 1, "nothing before the first screen");
+    assert.ok(ext.hasLog(/校對沒有參考前面的頁：這本書在位置 \d+–\d+之前還沒有翻過的段落/));
+
+    // What was drawn is kept, source and translation, by position.
+    const book = stored(ext);
+    const texts0 = ext.texts(0);
+    assert.deepEqual(book.paras.map((p) => p.source), texts0);
+    assert.deepEqual(book.paras.map((p) => p.text), texts0.map((t) => `譯：${t}`));
+    assert.ok(plain(ext.chrome.storage.local.data.get("refBooks"))["ref:B0TESTBOOK:rev1"] > 0);
+
+    await showAndWait(ext, 1);
+    const second = ext.claude.of("review")[1];
+    const blocks = refBlocks(second);
+    assert.match(blocks[0].text, /同一本書在這一頁之前/);
+    assert.equal(blocks[0].cache_control, undefined, "the intro isn't a breakpoint");
+    assert.deepEqual(blocks.at(-1).cache_control, { type: "ephemeral" });
+    assert.deepEqual(refParas(second), texts0.map((t) => ({ source: t, text: `譯：${t}` })));
+    assert.match(second.body.messages[0].content.at(-1).text, /不要修改或翻譯參考段落/);
+    assert.ok(ext.hasLog(new RegExp(`校對參考前面的頁：${texts0.length} 段（位置 \\d+–\\d+），約 \\d+ tokens，重新起算`)));
+
+    await showAndWait(ext, 2);
+    const third = ext.claude.of("review")[2];
+    const texts1 = ext.texts(1);
+    assert.deepEqual(refParas(third).map((p) => p.source), [...texts0, ...texts1], "the set grows at its end");
+    assert.equal(stored(ext).refStart, ext.info(0).start);
+    // The review's ids are the page's own, not the reference's.
+    assert.deepEqual(third.items.map((p) => p.id), ext.texts(2).map((_, i) => i));
+  });
+
+  test("going back, paragraphs after the page aren't sent", async () => {
+    const ext = startExtension({ settings: REF });
+    for (const i of [0, 1, 2]) await showAndWait(ext, i);
+    // Back to the first screen and retranslated: nothing comes before it.
+    await showAndWait(ext, 0);
+    await ext.translate();
+    assert.equal(ext.claude.of("review").at(-1).body.messages[0].content.length, 1);
+    await showAndWait(ext, 1);
+    await ext.translate();
+    assert.deepEqual(refParas(ext.claude.of("review").at(-1)).map((p) => p.source), ext.texts(0));
+  });
+
+  test("another book starts with no reference", async () => {
+    const ext = startExtension({ settings: REF });
+    await showAndWait(ext, 0);
+    const layout = testBook({ asin: "B0OTHER" }).layout();
+    await showAndWait(ext, 1, layout);
+    assert.equal(ext.claude.of("review").at(-1).body.messages[0].content.length, 1);
+    assert.ok(ext.chrome.storage.local.data.has("ref:B0OTHER:rev1"));
+    assert.ok(ext.chrome.storage.local.data.has("ref:B0TESTBOOK:rev1"));
+  });
+
+  test("books not read for a week are dropped", async () => {
+    const ext = startExtension({ settings: REF });
+    const old = Date.now() - 8 * 24 * 3600 * 1000;
+    await ext.chrome.storage.local.set({ "ref:B0OLD:r": { paras: [], refStart: null }, refBooks: { "ref:B0OLD:r": old } });
+    await showAndWait(ext, 0);
+    assert.ok(!ext.chrome.storage.local.data.has("ref:B0OLD:r"));
+    assert.deepEqual(Object.keys(plain(ext.chrome.storage.local.data.get("refBooks"))), ["ref:B0TESTBOOK:rev1"]);
+  });
+
+  test("a screen drawn from the cache is kept too", async () => {
+    const ext = startExtension();
+    await showAndWait(ext, 0);
+    await ext.chrome.storage.sync.set(REF);
+    await showAndWait(ext, 1);
+    await showAndWait(ext, 0); // from the cache
+    assert.deepEqual(stored(ext).paras.map((p) => p.source), [...ext.texts(0), ...ext.texts(1)]);
+  });
+
+  test("Haiku mode and the vision engine send and keep nothing", async () => {
+    const haiku = startExtension({ settings: { ...REF, quality: "haiku" } });
+    await showAndWait(haiku, 0);
+    await showAndWait(haiku, 1);
+    assert.equal(haiku.claude.of("review").length, 0);
+    const vision = startExtension({
+      settings: { ...REF, engine: "vision" },
+      claude: (req) => req.kind === "vision" && { json: { blocks: [{ kind: "paragraph", x0: 500, y0: 400, x1: 1500, y1: 600, lines: 3, text: "譯文" }], notes: "", summarized: false } },
+    });
+    await showAndWait(vision, 0);
+    assert.equal(vision.chrome.storage.local.data.size, 0);
+  });
+
+  test("local storage failing leaves the review and the page as they were", async () => {
+    const ext = startExtension({ settings: REF });
+    ext.chrome.storage.local.get = async () => {
+      throw new Error("disk full");
+    };
+    await showAndWait(ext, 0);
+    assert.equal(ext.claude.of("review").length, 1);
+    assert.equal(ext.claude.of("review")[0].body.messages[0].content.length, 1);
+    assert.ok(ext.hasLog(/校對沒有參考前面的頁：讀不到存下的段落（disk full）/));
+    assert.ok(ext.hasLog(/參考頁沒有存下來：disk full/));
+    assert.equal(ext.overlaysSent().length, 1);
+    assert.equal(ext.msgs("error").length, 0);
+  });
+
+  test("the token limit caps what's sent", async () => {
+    const ext = startExtension({ settings: { ...REF, referenceTokens: 2000 } });
+    for (const i of [0, 1, 2, 3, 4, 5]) await showAndWait(ext, i);
+    const sent = ext.claude.of("review").slice(1);
+    for (const r of sent) {
+      const tokens = refParas(r).reduce((n, p) => n + C.paraTokens(p), 0);
+      assert.ok(tokens <= 2000, `${tokens} tokens`);
+      assert.ok(refParas(r).length > 0);
+    }
   });
 });

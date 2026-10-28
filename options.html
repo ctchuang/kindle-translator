@@ -15,6 +15,8 @@
     summary { cursor:pointer; color:#888; }
     label.check { font-weight:400; display:flex; gap:8px; align-items:center; }
     label.check input { width:auto; }
+    button.link { margin:0 0 0 8px; padding:0; background:none; color:#146e78; font-size:12px; text-decoration:underline; }
+    #cleared { margin-left:8px; }
   </style>
 </head>
 <body>
@@ -43,6 +45,13 @@
 
   <label class="check"><input type="checkbox" id="prefetch" /> 預先翻譯下一頁</label>
   <div class="hint">讀目前這一頁時就先把下一頁翻好，翻過去就能直接顯示。照順序往後讀時不會多花；跳頁、往回翻或停止閱讀時，預先翻好但沒讀到的頁照樣計費。只用於翻譯方式 1、2，而且只在側邊欄開著、勾選「翻頁自動翻譯」時。</div>
+
+  <label class="check"><input type="checkbox" id="referencePages" /> 校對時參考前面的頁（實驗）</label>
+  <div class="hint">只用於翻譯方式 2。把同一本書在目前這一頁之前讀過的段落（原文和定稿的譯文）一起送給 Sonnet 校對，統一人名、專有名詞、稱呼和語氣。開啟後，畫上去的段落會存在這台電腦上，保留 1 週。上限 16000 時，連續閱讀每頁約多 0.6 美分，休息超過 5 分鐘後的第一頁約多 4 美分。</div>
+
+  <label for="referenceTokens">參考段落的上限（tokens）</label>
+  <input id="referenceTokens" type="number" min="2000" max="100000" step="1000" />
+  <div class="hint">約 1,200 tokens 一頁。超過上限時一次丟掉較舊的一半。<button id="clearReference" type="button" class="link">刪除已存的參考段落</button><span id="cleared"></span></div>
 
   <label for="targetLang">目標語言</label>
   <input id="targetLang" />
