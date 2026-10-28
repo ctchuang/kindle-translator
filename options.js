@@ -1,7 +1,7 @@
 const FIELDS = { apiKey: "", effort: "low", targetLang: "繁體中文（台灣用語）" };
 // Numbers, saved with the rest; an empty or out-of-range one saves the
 // nearest allowed value (the default when empty).
-const NUMBERS = { referenceTokens: { def: 16000, min: 2000, max: 100000 } };
+const NUMBERS = { referenceTokens: { def: 10000, min: 2000, max: 100000 } };
 // The page's one "translation mode" select maps onto two stored settings the
 // background reads: engine ("ocr" | "vision") and the OCR quality level.
 const MODE_SETTINGS = { engine: "ocr", quality: "review" };
@@ -49,12 +49,12 @@ chrome.storage.local.get({ devCapture: false }).then((v) => {
 });
 devCapture.onchange = () => chrome.storage.local.set({ devCapture: devCapture.checked });
 
-// The reference pages kept on this computer (background.js refUpdate): all
-// books, at once.
+// The reference pages and name lists kept on this computer (background.js
+// bookUpdate): all books, at once.
 document.getElementById("clearReference").onclick = async () => {
   const all = await chrome.storage.local.get(null);
-  const keys = Object.keys(all).filter((k) => k.startsWith("ref:") || k === "refBooks");
+  const keys = Object.keys(all).filter((k) => /^(ref|names):/.test(k) || k === "refBooks" || k === "nameBooks");
   await chrome.storage.local.remove(keys);
-  const books = keys.filter((k) => k.startsWith("ref:")).length;
-  document.getElementById("cleared").textContent = books ? `已刪除 ${books} 本書的參考段落` : "沒有存下的參考段落";
+  const books = new Set(keys.filter((k) => k.includes(":")).map((k) => k.slice(k.indexOf(":") + 1))).size;
+  document.getElementById("cleared").textContent = books ? `已刪除 ${books} 本書的參考段落和人名對照表` : "沒有存下的參考段落或人名對照表";
 };

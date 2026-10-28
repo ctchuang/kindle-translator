@@ -47,11 +47,11 @@
   <div class="hint">讀目前這一頁時就先把下一頁翻好，翻過去就能直接顯示。照順序往後讀時不會多花；跳頁、往回翻或停止閱讀時，預先翻好但沒讀到的頁照樣計費。只用於翻譯方式 1、2，而且只在側邊欄開著、勾選「翻頁自動翻譯」時。</div>
 
   <label class="check"><input type="checkbox" id="referencePages" /> 校對時參考前面的頁（實驗）</label>
-  <div class="hint">只用於翻譯方式 2。把同一本書在目前這一頁之前讀過的段落（原文和定稿的譯文）一起送給 Sonnet 校對，統一人名、專有名詞、稱呼和語氣。開啟後，畫上去的段落會存在這台電腦上，保留 1 週。上限 16000 時，連續閱讀每頁約多 0.6 美分，休息超過 5 分鐘後的第一頁約多 4 美分。</div>
+  <div class="hint">用於翻譯方式 2。兩件事：<br />・把同一本書在目前這一頁之前讀過的段落（原文和定稿的譯文）一起送給 Sonnet 校對，統一專有名詞、稱呼和語氣。畫上去的段落會存在這台電腦上，保留 1 週。<br />・每本書記一份人名對照表（英文原名 → 譯名），由 Sonnet 校對時整理，之後每次翻譯和校對都照它翻人名，不管隔了多少頁。每個名字最後一次出現後保留 30 天。已經記下的譯名不會被改掉。<br />上限 10000 時，連續閱讀每頁約多 1 美分。</div>
 
   <label for="referenceTokens">參考段落的上限（tokens）</label>
   <input id="referenceTokens" type="number" min="2000" max="100000" step="1000" />
-  <div class="hint">約 1,200 tokens 一頁。超過上限時一次丟掉較舊的一半。<button id="clearReference" type="button" class="link">刪除已存的參考段落</button><span id="cleared"></span></div>
+  <div class="hint">雙頁一個畫面約 3,000–3,500 tokens。超過上限時一次丟掉較舊的一半。人名對照表不受這個上限限制。<button id="clearReference" type="button" class="link">刪除已存的參考段落和人名對照表</button><span id="cleared"></span></div>
 
   <label for="targetLang">目標語言</label>
   <input id="targetLang" />

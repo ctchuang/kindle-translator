@@ -141,3 +141,66 @@ test.describe("referenceBlocks", () => {
     assert.deepEqual(C.referenceBlocks([]), []);
   });
 });
+
+test.describe("mergeNames", () => {
+  test("adds new names and says which", () => {
+    const out = C.mergeNames({}, [{ source: "Ender", text: "安德" }, { source: " Graff ", text: " 格拉夫 " }], 5);
+    assert.deepEqual(out.names, { Ender: { text: "安德", savedAt: 5 }, Graff: { text: "格拉夫", savedAt: 5 } });
+    assert.deepEqual(out.added, [{ source: "Ender", text: "安德" }, { source: "Graff", text: "格拉夫" }]);
+    assert.deepEqual(out.conflicts, []);
+  });
+
+  test("a listed name keeps its translation, seen again it lives on", () => {
+    const out = C.mergeNames({ Wiggin: { text: "威金", savedAt: 1 } }, [{ source: "Wiggin", text: "維金" }], 9);
+    assert.deepEqual(out.names, { Wiggin: { text: "威金", savedAt: 9 } });
+    assert.deepEqual(out.added, []);
+    assert.deepEqual(out.conflicts, [{ source: "Wiggin", text: "維金", kept: "威金" }]);
+  });
+
+  test("the same translation again is no conflict", () => {
+    const out = C.mergeNames({ Ender: { text: "安德", savedAt: 1 } }, [{ source: "Ender", text: "安德" }], 2);
+    assert.deepEqual(out.conflicts, []);
+    assert.equal(out.names.Ender.savedAt, 2);
+  });
+
+  test("names not seen for 30 days go", () => {
+    const stored = { Old: { text: "舊", savedAt: 0 }, Recent: { text: "新", savedAt: 10 * DAY } };
+    const out = C.mergeNames(stored, [], 30 * DAY + DAY / 2);
+    assert.deepEqual(Object.keys(out.names), ["Recent"]);
+  });
+
+  test("blank, missing or overlong entries are skipped", () => {
+    const out = C.mergeNames({}, [{ source: "", text: "空" }, { source: "X", text: " " }, null, { source: "A".repeat(61), text: "長" }, { source: "Bean", text: "豆子".repeat(16) }], 1);
+    assert.deepEqual(out.names, {});
+  });
+
+  test("past the per-book limit the names seen longest ago go", () => {
+    const stored = Object.fromEntries(Array.from({ length: C.NAMES_MAX }, (_, i) => [`N${i}`, { text: `名${i}`, savedAt: i }]));
+    const out = C.mergeNames(stored, [{ source: "New", text: "新" }], C.NAMES_MAX);
+    assert.equal(Object.keys(out.names).length, C.NAMES_MAX);
+    assert.ok(!("N0" in out.names));
+    assert.ok("New" in out.names);
+  });
+});
+
+test.describe("namesIn", () => {
+  const names = { Ender: { text: "安德" }, "Mazer Rackham": { text: "馬澤·拉克漢" }, Peter: { text: "彼得" }, Bean: { text: "豆子" } };
+
+  test("only names on the page, as whole words, sorted", () => {
+    const out = C.namesIn(names, ["Ender's launch.", "Not Peterson, not beans.", "Mazer Rackham could win."]);
+    assert.deepEqual(out, [
+      { source: "Ender", text: "安德" },
+      { source: "Mazer Rackham", text: "馬澤·拉克漢" },
+    ]);
+  });
+
+  test("names with regex characters are matched literally", () => {
+    assert.deepEqual(C.namesIn({ "Mr. Wiggin": { text: "威金先生" } }, ["said Mr. Wiggin"]), [{ source: "Mr. Wiggin", text: "威金先生" }]);
+    assert.deepEqual(C.namesIn({ "Mr. Wiggin": { text: "威金先生" } }, ["said Mrs Wiggin"]), []);
+  });
+
+  test("no names, no page", () => {
+    assert.deepEqual(C.namesIn(undefined, ["Ender"]), []);
+    assert.deepEqual(C.namesIn(names, []), []);
+  });
+});

@@ -1,6 +1,7 @@
 // Reference pages for the review: paragraphs of the same book translated
 // before the page under review, so Sonnet can keep names, terms and tone in
-// line with what the reader has already seen (docs/reference-pages.md).
+// line with what the reader has already seen; and the book's list of names
+// and their translations (docs/reference-pages.md).
 // Paragraphs are kept by their position range in the book, like the
 // paragraph cache, so they're the same in any layout.
 // Loaded by the service worker with importScripts; no DOM or chrome APIs.
@@ -105,6 +106,59 @@ function referenceBlocks(paras) {
   return blocks;
 }
 
+// ---- Name list ----
+
+// The book's names as the review settled them, source → translation, so a
+// name keeps one translation however far back it was first seen. Kept 30
+// days after a name was last on a reviewed page.
+const NAMES_MAX_AGE_MS = 30 * 24 * 3600 * 1000;
+// Per book; past it the names seen longest ago go.
+const NAMES_MAX = 500;
+
+// `stored` ({ [source]: { text, savedAt } }) with the names the review
+// found on a page ([{ source, text }]). A name already listed keeps its
+// translation, so the first one sticks; a different one comes back in
+// `conflicts`. Returns { names, added, conflicts }.
+function mergeNames(stored, found, now) {
+  const names = {};
+  for (const [source, n] of Object.entries(stored || {})) if (now - n.savedAt <= NAMES_MAX_AGE_MS) names[source] = n;
+  const added = [];
+  const conflicts = [];
+  for (const f of found || []) {
+    const source = String(f?.source ?? "").trim();
+    const text = String(f?.text ?? "").trim();
+    if (!source || !text || source.length > 60 || text.length > 30) continue;
+    const had = names[source];
+    if (had) {
+      if (had.text !== text) conflicts.push({ source, text, kept: had.text });
+      names[source] = { text: had.text, savedAt: now };
+    } else {
+      names[source] = { text, savedAt: now };
+      added.push({ source, text });
+    }
+  }
+  const keys = Object.keys(names);
+  if (keys.length > NAMES_MAX) {
+    keys.sort((a, b) => names[a].savedAt - names[b].savedAt);
+    for (const k of keys.slice(0, keys.length - NAMES_MAX)) delete names[k];
+  }
+  return { names, added, conflicts };
+}
+
+// The listed names that appear, as whole words, in any of `texts`, as
+// [{ source, text }] by source.
+function namesIn(names, texts) {
+  const all = texts.join("\n");
+  return Object.keys(names || {})
+    .filter((source) => new RegExp(`(^|[^\\p{L}\\p{N}])${escapeRegExp(source)}(?![\\p{L}\\p{N}])`, "u").test(all))
+    .sort()
+    .map((source) => ({ source, text: names[source].text }));
+}
+
+function escapeRegExp(s) {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
 if (typeof module !== "undefined") {
-  module.exports = { REF_MAX_AGE_MS, REF_MAX_PARAS, REF_BLOCK_TOKENS, estimateTokens, paraTokens, mergeParas, pickReference, referenceBlocks };
+  module.exports = { REF_MAX_AGE_MS, REF_MAX_PARAS, REF_BLOCK_TOKENS, NAMES_MAX_AGE_MS, NAMES_MAX, estimateTokens, paraTokens, mergeParas, pickReference, referenceBlocks, mergeNames, namesIn };
 }

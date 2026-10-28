@@ -46,7 +46,7 @@ Translations are kept per paragraph, by the paragraph's position in the book, wh
 - In a tab where the book was opened before the extension was loaded (or reloaded), the page on screen is only recognised once the reader fetches its next batch of page data; the side panel says so, and reloading the Kindle tab is quickest.
 - Translation starts about 1.2 seconds after the last page turn, so pages flipped past quickly are never sent. If you turn the page mid-translation, that page finishes in the background and goes into the cache (one page at most; beyond that the oldest is cancelled) while the new page starts right away; turning back to a page still translating waits for it instead of sending it again. The cache is cleared when the browser closes.
 - **Translate the next page ahead** (options page, on by default): about 2 seconds after the current page's translation is drawn, the next page is translated. Reading on page by page this costs nothing extra; when you stop reading, jump or turn back, pages translated ahead but never read are still billed. Modes 1 and 2 only.
-- **Refer to earlier pages when reviewing** (options page, experimental, off by default): in Polished mode, Sonnet's review also gets the paragraphs of the same book you've read before the current page (original and final translation), to keep names, terms and tone consistent. Once on, the paragraphs drawn on the page (original and translation) are kept in Chrome's local storage on this computer for a week; the options page can delete them in one go. The reference is capped at 16,000 tokens by default (about 13 pages) and uses prompt caching: about 0.6 US cents more per page while reading on, about 4 cents for the first page after a break of more than 5 minutes. Only what comes before the current page is sent, never what you haven't read yet.
+- **Refer to earlier pages when reviewing** (options page, experimental, off by default): in Polished mode, Sonnet's review also gets the paragraphs of the same book you've read before the current page (original and final translation), to keep names, terms and tone consistent. It also keeps a list of each book's names (original → translation), compiled by Sonnet's review, and every later translation and review follows it, however many pages back a name was first seen; a name already listed keeps its translation. Once on, the paragraphs drawn on the page (original and translation) and the name list are kept in Chrome's local storage on this computer, paragraphs for a week and names for 30 days; the options page can delete them in one go. The reference is capped at 10,000 tokens by default (about 3 two-page screens) and uses prompt caching: about 1 US cent more per page while reading on, about 2.5 cents for the first page after a break of more than 5 minutes. Only what comes before the current page is sent, never what you haven't read yet.
 - The options page's 「翻譯方式」 (translation mode) has three choices:
   - **1. Fast**: Tesseract.js reads each column's text in the browser, the reader's page data splits it into paragraphs, and only the text is sent to Claude Haiku 5.5. On a two-page spread both columns are sent in parallel. About 0.1 US cent per page; the page image never leaves your computer. Only the English OCR model is bundled for now.
   - **2. Polished (default)**: as 1, then Sonnet 5.5 reviews Haiku's translation, returning only the paragraphs it changes; the changes are listed in the side panel's log. About 1 cent per page.
@@ -62,6 +62,9 @@ Translations are kept per paragraph, by the paragraph's position in the book, wh
 
 ## Release notes
 
+- **2.3.0**: a list of names per book.
+  - With "refer to earlier pages when reviewing" on, each book gets a list of names (original → translation), compiled by Sonnet's review; every later translation (including a column Opus took over) and review follows it, however many pages back a name was first seen. A name already listed keeps its translation; each is kept for 30 days after it was last seen and can be deleted from the options page.
+  - The reference's default cap goes down from 16,000 to 10,000 tokens.
 - **2.2.0**: the review can refer to earlier pages.
   - New: refer to earlier pages when reviewing (experimental, off by default). Sonnet's review sees the paragraphs of the same book read before, to keep names, terms and tone consistent. They're kept on this computer for a week and can be deleted from the options page.
   - Polished mode now reviews the whole page once both columns are translated, instead of each column separately.
@@ -128,7 +131,7 @@ The detailed design (in Chinese) is in [docs/design.md](docs/design.md).
 - `background.js`: decides which page to translate, Claude API calls (structured outputs), the paragraph cache, translating ahead, the vision mode's screenshot
 - `ocr-layout.js`: puts OCR lines and words into paragraphs, with each word's style
 - `styled-text.js`: handles translations with italics, bold and highlights
-- `context-pages.js`: picks the earlier paragraphs the review refers to
+- `context-pages.js`: picks the earlier paragraphs the review refers to, and keeps the list of names
 - `offscreen.html/js`: runs Tesseract in an offscreen document (a service worker can't start a Web Worker)
 - `sidepanel.html/js`: side panel UI
 - `options.html/js`: options page (API key, translation mode, translate ahead, refer to earlier pages, effort, target language)

@@ -77,7 +77,7 @@ test("saving an OCR mode writes trimmed fields, engine and quality, and drops le
     quality: "haiku",
     prefetch: true,
     referencePages: false,
-    referenceTokens: 16000,
+    referenceTokens: 10000,
     overlay: false, // other settings are left alone
   });
 });
@@ -94,29 +94,37 @@ test("the reference switch and limit show and save, the limit kept in range", as
   assert.equal(s.$("referenceTokens").value, "2000", "the field shows what was saved");
   s.$("referenceTokens").value = "";
   await save(s);
-  assert.equal(s.stored().referenceTokens, 16000);
+  assert.equal(s.stored().referenceTokens, 10000);
   s.$("referenceTokens").value = "abc";
   await save(s);
-  assert.equal(s.stored().referenceTokens, 16000);
+  assert.equal(s.stored().referenceTokens, 10000);
 });
 
 test("the reference is off by default", async (t) => {
   const s = await setup(t);
   assert.equal(s.$("referencePages").checked, false);
-  assert.equal(s.$("referenceTokens").value, "16000");
+  assert.equal(s.$("referenceTokens").value, "10000");
 });
 
-test("deleting the kept reference removes every book and nothing else", async (t) => {
+test("deleting the kept reference removes every book's paragraphs and names, and nothing else", async (t) => {
   const s = await setup(t);
-  await s.chrome.storage.local.set({ "ref:A:1": { paras: [] }, "ref:B:2": { paras: [] }, refBooks: { "ref:A:1": 1, "ref:B:2": 1 }, devCapture: true });
+  await s.chrome.storage.local.set({
+    "ref:A:1": { paras: [] },
+    "ref:B:2": { paras: [] },
+    "names:A:1": { names: {} },
+    "names:C:3": { names: {} },
+    refBooks: { "ref:A:1": 1, "ref:B:2": 1 },
+    nameBooks: { "names:A:1": 1, "names:C:3": 1 },
+    devCapture: true,
+  });
   s.$("clearReference").click();
   await waitFor(() => s.$("cleared").textContent, { what: "cleared note" });
-  assert.equal(s.$("cleared").textContent, "已刪除 2 本書的參考段落");
+  assert.equal(s.$("cleared").textContent, "已刪除 3 本書的參考段落和人名對照表");
   assert.deepEqual([...s.chrome.storage.local.data.keys()], ["devCapture"]);
   s.$("cleared").textContent = "";
   s.$("clearReference").click();
   await waitFor(() => s.$("cleared").textContent, { what: "cleared note" });
-  assert.equal(s.$("cleared").textContent, "沒有存下的參考段落");
+  assert.equal(s.$("cleared").textContent, "沒有存下的參考段落或人名對照表");
 });
 
 test("the prefetch checkbox shows and saves the setting", async (t) => {

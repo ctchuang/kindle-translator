@@ -10,4 +10,8 @@
 
 ## 校對時參考前面的頁：本機實測
 
-2.2.0 已實作（預設關閉），還要在實際的 Kindle Cloud Reader 上比較開和關的品質，並從執行紀錄確認 prompt cache 有命中。待辦清單見 [docs/reference-pages.md](docs/reference-pages.md) §7。
+已實作（2.2.0、2.3.0，預設關閉）。參考段落在《Ender's Game》上實測過；人名對照表還要再跑一次同一段，確認人名不再跑掉。待辦清單見 [docs/reference-pages.md](docs/reference-pages.md) §7。
+
+## 人名對照表可以修改
+
+先到先贏，第一次就翻錯的人名會一直錯。在側邊欄列出這本書的對照表，讓使用者改譯名或刪掉一個名字。

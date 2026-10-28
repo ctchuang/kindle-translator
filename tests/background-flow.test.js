@@ -7,6 +7,7 @@ const test = require("node:test");
 const assert = require("node:assert/strict");
 const { plain, waitFor } = require("./helpers/load");
 const { startExtension, testBook } = require("./helpers/extension");
+const { words } = require("./helpers/kindle");
 const R = require("../page-render.js");
 const C = require("../context-pages.js");
 
@@ -1540,5 +1541,110 @@ test.describe("reference pages (the review sees the book's earlier paragraphs)",
       assert.ok(tokens <= 2000, `${tokens} tokens`);
       assert.ok(refParas(r).length > 0);
     }
+  });
+});
+
+test.describe("the book's name list", () => {
+  const REF = { referencePages: true };
+  // Ender and Graff on every screen, Valentine on none.
+  const namedBook = () => testBook({ paragraphs: Array.from({ length: 60 }, (_, i) => (i % 3 === 0 ? `Ender looked at Graff and ${words(i, 6)}.` : `${words(i, 10)}.`)) });
+  const promptOf = (req) => req.body.messages[0].content.at(-1).text;
+  const names = (ext) => plain(ext.chrome.storage.local.data.get("names:B0TESTBOOK:rev1"))?.names;
+  const listing = (list) => (req) => req.kind === "review" && { json: { corrections: [], notes: "", names: list } };
+
+  test("off: no names asked for, none kept, none sent", async () => {
+    const ext = startExtension({ book: namedBook(), claude: listing([{ source: "Ender", text: "安德" }]) });
+    await showAndWait(ext, 0);
+    await showAndWait(ext, 1);
+    for (const r of ext.claude.of("review")) assert.equal(r.body.output_config.format.schema.properties.names, undefined);
+    for (const r of ext.claude.calls) assert.doesNotMatch(promptOf(r), /對照表|names：/);
+    assert.equal(names(ext), undefined);
+  });
+
+  test("the review lists the page's names, and they're kept", async () => {
+    const ext = startExtension({ book: namedBook(), settings: REF, claude: listing([{ source: "Ender", text: "安德" }, { source: "Graff", text: "格拉夫" }]) });
+    await showAndWait(ext, 0);
+    const [review] = ext.claude.of("review");
+    assert.deepEqual(plain(review.body.output_config.format.schema.required), ["corrections", "notes", "names"]);
+    assert.match(promptOf(review), /names：列出這一頁原文裡出現的每一個人名/);
+    assert.deepEqual(Object.fromEntries(Object.entries(names(ext)).map(([k, v]) => [k, v.text])), { Ender: "安德", Graff: "格拉夫" });
+    assert.ok(ext.hasLog(/人名對照表新增：Ender → 安德、Graff → 格拉夫/));
+    assert.ok(plain(ext.chrome.storage.local.data.get("nameBooks"))["names:B0TESTBOOK:rev1"] > 0);
+  });
+
+  test("later drafts and reviews get the names on their page, not the others", async () => {
+    const ext = startExtension({ book: namedBook(), settings: REF, claude: listing([{ source: "Ender", text: "安德" }]) });
+    await ext.chrome.storage.local.set({ "names:B0TESTBOOK:rev1": { names: { Graff: { text: "格拉夫", savedAt: Date.now() }, Valentine: { text: "華倫泰", savedAt: Date.now() } } } });
+    await showAndWait(ext, 0);
+    const want = '[{"source":"Graff","text":"格拉夫"}]';
+    for (const r of [...ext.claude.of("translate"), ...ext.claude.of("review")].filter((r) => (r.items || []).some((p) => /Graff/.test(p.text ?? p.source)))) {
+      assert.ok(promptOf(r).includes(`人名一律照這份對照表翻譯（source 是原文，text 是譯名），初稿或譯文不一致時改成對照表的譯名：${want}`), r.kind);
+    }
+    assert.ok(ext.hasLog(/人名對照表：這一頁用到 1 個（Graff → 格拉夫）/));
+    assert.doesNotMatch(JSON.stringify(ext.claude.calls.map((c) => c.body)), /華倫泰/);
+    // The page's items are still the JSON at the end.
+    assert.deepEqual(ext.claude.of("review")[0].items.map((p) => p.id).length > 0, true);
+
+    // Ender, learnt on the first screen, goes with the second.
+    await showAndWait(ext, 1);
+    const second = ext.claude.of("review").at(-1);
+    assert.match(promptOf(second), /\{"source":"Ender","text":"安德"\},\{"source":"Graff","text":"格拉夫"\}/);
+  });
+
+  test("a different translation of a listed name doesn't replace it", async () => {
+    const ext = startExtension({ book: namedBook(), settings: REF, claude: listing([{ source: "Ender", text: "恩德" }]) });
+    const before = Date.now() - 24 * 3600 * 1000;
+    await ext.chrome.storage.local.set({ "names:B0TESTBOOK:rev1": { names: { Ender: { text: "安德", savedAt: before } } } });
+    await showAndWait(ext, 0);
+    assert.equal(names(ext).Ender.text, "安德");
+    assert.ok(names(ext).Ender.savedAt > before, "seen again, it lives on");
+    assert.ok(ext.hasLog(/人名對照表已有別的譯法，沿用原本的：Ender → 安德（這次是 恩德）/));
+  });
+
+  test("names not seen for 30 days, and books not read for 30 days, go", async () => {
+    const ext = startExtension({ book: namedBook(), settings: REF, claude: listing([]) });
+    const old = Date.now() - 31 * 24 * 3600 * 1000;
+    await ext.chrome.storage.local.set({
+      "names:B0TESTBOOK:rev1": { names: { Graff: { text: "葛拉夫", savedAt: old } } },
+      "names:B0OLD:r": { names: {} },
+      nameBooks: { "names:B0OLD:r": old },
+    });
+    await showAndWait(ext, 0);
+    assert.ok(!ext.hasLog(/人名對照表：這一頁用到/), "the expired Graff isn't sent");
+    assert.deepEqual(names(ext), {});
+    assert.ok(!ext.chrome.storage.local.data.has("names:B0OLD:r"));
+  });
+
+  test("an Opus fallback translation gets the names too", async () => {
+    const ext = startExtension({
+      book: namedBook(),
+      settings: REF,
+      claude: (req) => req.kind === "translate" && req.body.model === "claude-haiku-5-5" && req.n === 0 && { json: { translations: [], notes: "版權", summarized: false } },
+    });
+    await ext.chrome.storage.local.set({ "names:B0TESTBOOK:rev1": { names: { Ender: { text: "安德", savedAt: Date.now() } } } });
+    await showAndWait(ext, 0);
+    const [opus] = ext.claude.calls.filter((c) => c.body.model === "claude-opus-5-5");
+    assert.ok(opus);
+    if (opus.items.some((p) => /Ender/.test(p.text))) assert.match(promptOf(opus), /"source":"Ender","text":"安德"/);
+  });
+
+  test("Haiku mode uses the names kept, without a review to add any", async () => {
+    const ext = startExtension({ book: namedBook(), settings: { ...REF, quality: "haiku" } });
+    await ext.chrome.storage.local.set({ "names:B0TESTBOOK:rev1": { names: { Ender: { text: "安德", savedAt: Date.now() } } } });
+    await showAndWait(ext, 0);
+    assert.equal(ext.claude.of("review").length, 0);
+    assert.ok(ext.claude.of("translate").some((r) => /"source":"Ender","text":"安德"/.test(promptOf(r))));
+  });
+
+  test("a name list that can't be read or written leaves the page as it was", async () => {
+    const ext = startExtension({ book: namedBook(), settings: REF, claude: listing([{ source: "Ender", text: "安德" }]) });
+    ext.chrome.storage.local.get = async () => {
+      throw new Error("disk full");
+    };
+    await showAndWait(ext, 0);
+    assert.ok(ext.hasLog(/讀不到人名對照表（disk full），這次不用/));
+    assert.ok(ext.hasLog(/人名對照表沒有存下來：disk full/));
+    assert.equal(ext.overlaysSent().length, 1);
+    assert.equal(ext.msgs("error").length, 0);
   });
 });

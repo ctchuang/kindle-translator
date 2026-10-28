@@ -48,7 +48,7 @@ const DEFAULTS = {
   autoTranslate: true,
   prefetch: true,
   referencePages: false,
-  referenceTokens: 16000,
+  referenceTokens: 10000,
   targetLang: "繁體中文（台灣用語）",
   overlay: true,
 };
@@ -270,31 +270,69 @@ async function drawFromCache(page, settings, { post = true } = {}) {
 
 // ---- Reference pages ----
 
-// With the options page's switch on, the paragraphs drawn on screen (source
-// and final translation) are kept per book in local storage for a week, and
-// the review is sent the ones before its page (context-pages.js). Index:
-// refBooks = { "ref:<asin>:<revision>": last saved }, so books not read for
-// a week are dropped too.
-let refChain = Promise.resolve(); // one read-modify-write at a time
+// With the options page's switch on, two things are kept per book in local
+// storage (context-pages.js):
+// - the paragraphs drawn on screen (source and final translation), for a
+//   week; the review is sent the ones before its page. Index refBooks.
+// - the names the review settled on (source → translation), for 30 days
+//   after each was last seen; every translation and review is sent the ones
+//   on its page. Index nameBooks.
+// An index maps each book's key to when it was last written, so books not
+// read for that long are dropped too.
+let bookChain = Promise.resolve(); // one read-modify-write at a time
 
 function refKey(page) {
   return `ref:${page.asin}:${page.revision}`;
 }
 
-function refUpdate(page, change) {
-  const run = refChain.then(async () => {
-    const key = refKey(page);
+function namesKey(page) {
+  return `names:${page.asin}:${page.revision}`;
+}
+
+// Read `key` (or `empty`), let `change(book, now)` edit it, write it back,
+// and drop the books in `index` not written for `maxAge`.
+function bookUpdate(key, index, maxAge, empty, change) {
+  const run = bookChain.then(async () => {
     const now = Date.now();
-    const { [key]: book = { paras: [], refStart: null }, refBooks = {} } = await chrome.storage.local.get([key, "refBooks"]);
+    const { [key]: book = empty, [index]: books = {} } = await chrome.storage.local.get([key, index]);
     const out = change(book, now);
-    const stale = Object.keys(refBooks).filter((k) => k !== key && now - refBooks[k] > REF_MAX_AGE_MS);
-    for (const k of stale) delete refBooks[k];
+    const stale = Object.keys(books).filter((k) => k !== key && now - books[k] > maxAge);
+    for (const k of stale) delete books[k];
     if (stale.length) await chrome.storage.local.remove(stale);
-    await chrome.storage.local.set({ [key]: book, refBooks: { ...refBooks, [key]: now } });
+    await chrome.storage.local.set({ [key]: book, [index]: { ...books, [key]: now } });
     return out;
   });
-  refChain = run.catch(() => {});
+  bookChain = run.catch(() => {});
   return run;
+}
+
+function refUpdate(page, change) {
+  return bookUpdate(refKey(page), "refBooks", REF_MAX_AGE_MS, { paras: [], refStart: null }, change);
+}
+
+// The book's listed names that appear in `texts` ([{ source, text }]), or
+// none: switch off, unknown book, nothing listed, or storage unreadable.
+async function bookNames(settings, page, texts) {
+  if (!settings.referencePages || !page?.asin) return [];
+  try {
+    const key = namesKey(page);
+    const { [key]: book } = await chrome.storage.local.get(key);
+    return namesIn(mergeNames(book?.names, [], Date.now()).names, texts);
+  } catch (err) {
+    log(`讀不到人名對照表（${err.message || err}），這次不用`);
+    return [];
+  }
+}
+
+// Add the names a review found; a name already listed keeps its translation.
+async function saveNames(page, found, tag) {
+  const res = await bookUpdate(namesKey(page), "nameBooks", NAMES_MAX_AGE_MS, { names: {} }, (book, now) => {
+    const res = mergeNames(book.names, found, now);
+    book.names = res.names;
+    return res;
+  });
+  if (res.added.length) log(`${tag}人名對照表新增：${res.added.map((n) => `${n.source} → ${n.text}`).join("、")}`);
+  if (res.conflicts.length) log(`${tag}人名對照表已有別的譯法，沿用原本的：${res.conflicts.map((c) => `${c.source} → ${c.kept}（這次是 ${c.text}）`).join("、")}`);
 }
 
 // Keep the paragraphs of a screen just drawn (OCR engine only).
@@ -842,6 +880,8 @@ async function requestTranslations(settings, paras, jobSignal, page) {
   const plan = qualityOf(settings);
   const items = paras.map((p, id) => ({ id, text: p.source }));
   const chunks = splitParas(items, paras);
+  const names = await bookNames(settings, page, items.map((p) => p.text));
+  if (names.length) log(`人名對照表：這一頁用到 ${names.length} 個（${names.map((n) => `${n.source} → ${n.text}`).join("、")}）`);
   let out;
   for (let attempt = 0; ; attempt++) {
     // Output speed is the bottleneck, so translate the chunks side by side.
@@ -851,8 +891,8 @@ async function requestTranslations(settings, paras, jobSignal, page) {
     try {
       // Drafts side by side, then one review of the whole screen: it only
       // outputs what it changes, so splitting it would save little time.
-      const drafts = await Promise.all(chunks.map((chunk, i) => translateChunk(settings, chunk, chunks.length > 1 ? `[${i + 1}/${chunks.length}] ` : "", signal)));
-      outs = plan.review ? await reviewDrafts(settings, plan.review, chunks, drafts, signal, page) : drafts;
+      const drafts = await Promise.all(chunks.map((chunk, i) => translateChunk(settings, chunk, chunks.length > 1 ? `[${i + 1}/${chunks.length}] ` : "", signal, names)));
+      outs = plan.review ? await reviewDrafts(settings, plan.review, chunks, drafts, signal, page, names) : drafts;
     } catch (err) {
       failed.abort(); // don't leave the other calls running
       throw err;
@@ -1182,7 +1222,10 @@ const TRANSLATIONS_SCHEMA = {
   additionalProperties: false,
 };
 
-function buildTextPrompt(targetLang, paras) {
+function buildTextPrompt(targetLang, paras, names = []) {
+  const rules = [];
+  if (paras.some((p) => hasMarks(p.text))) rules.push(MARKS_RULE);
+  if (names.length) rules.push(namesRule(names));
   return `以下是使用者正在閱讀的一本已出版的書目前這一頁的文字，由 OCR 從書頁圖片辨識出來，可能有少量辨識錯誤。請逐段翻譯給使用者閱讀。
 輸入是 JSON 陣列，每個元素是一段：id 和 text。
 1. translations：每一段一個元素，id 對應輸入，text 是該段翻成${targetLang}的譯文，只放譯文、不附原文。不要合併或拆開段落，每個 id 都要有。
@@ -1190,15 +1233,23 @@ function buildTextPrompt(targetLang, paras) {
 3. 看起來不是書本內文的雜訊（亂碼、閱讀器介面文字），text 留空字串。
 4. notes：如果有任何段落沒有翻譯（包括你決定不翻譯的），用一句話說明是哪些、為什麼；全部都有翻就留空字串。
 5. summarized：如果任何段落放的是摘要或改寫，而不是逐句翻譯，設為 true；否則 false。
-6. 譯文是中文時，引號用「」，引號裡面的引號用『』。${paras.some((p) => hasMarks(p.text)) ? MARKS_RULE : ""}
+6. 譯文是中文時，引號用「」，引號裡面的引號用『』。${rules.map((r, i) => `\n${7 + i}. ${r}`).join("")}
 
 ${JSON.stringify(paras)}`;
 }
 
 // Added to the prompts only when some paragraph has style marks, so pages
 // without any are asked exactly as before.
-const MARKS_RULE = `
-7. 原文裡的 <i>…</i>（斜體）、<b>…</b>（粗體）、<h1>…</h1>、<h2>…</h2>（使用者畫的螢光標記）等標記，要在譯文裡包住意思對應的字。不要新增、刪除或改名標記，標記可以一層包一層，但不能交錯。`;
+const MARKS_RULE = `原文裡的 <i>…</i>（斜體）、<b>…</b>（粗體）、<h1>…</h1>、<h2>…</h2>（使用者畫的螢光標記）等標記，要在譯文裡包住意思對應的字。不要新增、刪除或改名標記，標記可以一層包一層，但不能交錯。`;
+
+// Added to the prompts when the book's name list has names on the page.
+function namesRule(names) {
+  return `人名一律照這份對照表翻譯（source 是原文，text 是譯名），初稿或譯文不一致時改成對照表的譯名：${JSON.stringify(names)}`;
+}
+
+// Added to the review prompt with the reference switch on: the names on the
+// page go into the book's name list.
+const NAMES_FIELD_RULE = "names：列出這一頁原文裡出現的每一個人名，包括只出現姓或名、綽號、頭銜加姓氏。source 是原文的寫法（不含所有格的 's），text 是定稿譯文裡用的譯名。地名、組織、物品等其他名稱不要列。沒有人名就給空陣列。";
 
 // Added to the review prompt when the book's earlier paragraphs come first.
 const REFERENCE_RULE = "前面的參考段落是同一本書較早的部分，已經定稿：人名、專有名詞、稱呼和語氣跟參考段落不一致時，改成跟參考段落一致（參考段落本身有明顯錯誤時除外）。不要修改或翻譯參考段落，corrections 只能列下面輸入裡的 id。這一頁的意思以這一頁的原文為準，不要用參考段落補完這一頁被切斷的段落。";
@@ -1221,10 +1272,30 @@ const REVIEW_SCHEMA = {
   additionalProperties: false,
 };
 
-function buildReviewPrompt(targetLang, items, withReference = false) {
+// With the reference switch on, the review also lists the page's names.
+const REVIEW_NAMES_SCHEMA = {
+  ...REVIEW_SCHEMA,
+  properties: {
+    ...REVIEW_SCHEMA.properties,
+    names: {
+      type: "array",
+      items: {
+        type: "object",
+        properties: { source: { type: "string" }, text: { type: "string" } },
+        required: ["source", "text"],
+        additionalProperties: false,
+      },
+    },
+  },
+  required: [...REVIEW_SCHEMA.required, "names"],
+};
+
+function buildReviewPrompt(targetLang, items, { withReference = false, names = [], listNames = false } = {}) {
   const rules = [];
   if (items.some((p) => hasMarks(p.source))) rules.push("保留初稿裡的 <i>、<b>、<h1> 等標記；修改譯文時，把標記搬到意思對應的字上。不要新增、刪除或改名標記，標記不能交錯。");
   if (withReference) rules.push(REFERENCE_RULE);
+  if (listNames) rules.push(NAMES_FIELD_RULE);
+  if (names.length) rules.push(namesRule(names));
   return `以下是使用者正在閱讀的一本已出版的書目前這一頁的文字（由 OCR 從書頁圖片辨識，可能有少量辨識錯誤），以及另一個模型翻成${targetLang}的初稿。請校對初稿給使用者閱讀。
 輸入是 JSON 陣列，每個元素是一段：id、source（原文）、draft（初稿譯文）。
 1. 檢查誤譯、漏譯、語意不清、不通順或不像${targetLang}的說法，以及同一頁人名、用語前後不一致。
@@ -1258,9 +1329,9 @@ async function visionTranslate(settings, image, signal) {
 // The text model sometimes declines a chunk (copyright) or answers with a
 // summary; Haiku did in testing. Opus usually translates the same text, so
 // hand it just that chunk instead of retrying, which tends to decline again.
-async function translateChunk(settings, chunk, tag, signal) {
+async function translateChunk(settings, chunk, tag, signal, names = []) {
   const model = qualityOf(settings).translate;
-  const content = [{ type: "text", text: buildTextPrompt(settings.targetLang, chunk) }];
+  const content = [{ type: "text", text: buildTextPrompt(settings.targetLang, chunk, names) }];
   const out = await callClaude(settings, {
     signal,
     tag,
@@ -1282,20 +1353,22 @@ function qualityOf(settings) {
 }
 
 // Review the drafts of a screen's chunks in one request. An Opus fallback's
-// translation isn't reviewed.
-async function reviewDrafts(settings, model, chunks, drafts, signal, page) {
+// translation isn't reviewed (it was given the name list, though).
+async function reviewDrafts(settings, model, chunks, drafts, signal, page, names) {
   const mine = drafts.map((d) => !d.byOpus);
   if (!mine.includes(true)) return drafts;
   const chunk = chunks.filter((c, i) => mine[i]).flat();
   const merged = { translations: drafts.filter((d, i) => mine[i]).flatMap((d) => d.translations || []) };
-  const reviewed = new Map((await reviewChunk(settings, model, chunk, merged, "", signal, page)).translations.map((t) => [t.id, t.text]));
+  const reviewed = new Map((await reviewChunk(settings, model, chunk, merged, "", signal, page, names)).translations.map((t) => [t.id, t.text]));
   return drafts.map((d, i) => (mine[i] ? { ...d, translations: (d.translations || []).map((t) => ({ ...t, text: reviewed.get(t.id) ?? t.text })) } : d));
 }
 
 // Apply `model`'s corrections to a draft. A failed or declined review keeps
 // the draft: it's already a usable translation. With the reference switch
-// on, the book's earlier paragraphs go first (see referenceContent).
-async function reviewChunk(settings, model, chunk, draft, tag, signal, page) {
+// on, the book's earlier paragraphs go first (see referenceContent), the
+// book's names on the page go with the prompt, and the names the review
+// lists go into the book's name list.
+async function reviewChunk(settings, model, chunk, draft, tag, signal, page, names = []) {
   const texts = new Map((draft.translations || []).map((t) => [t.id, t.text]));
   const items = chunk
     .map((p) => ({ id: p.id, source: p.text, draft: texts.get(p.id) || "" }))
@@ -1308,6 +1381,7 @@ async function reviewChunk(settings, model, chunk, draft, tag, signal, page) {
         return null;
       })
     : null;
+  const listNames = !!settings.referencePages && !!page?.asin;
   const started = Date.now();
   let out;
   try {
@@ -1317,8 +1391,8 @@ async function reviewChunk(settings, model, chunk, draft, tag, signal, page) {
       model,
       effort: "low",
       thinking: TEXT_MODELS[model],
-      schema: REVIEW_SCHEMA,
-      content: [...(reference || []), { type: "text", text: buildReviewPrompt(settings.targetLang, items, !!reference) }],
+      schema: listNames ? REVIEW_NAMES_SCHEMA : REVIEW_SCHEMA,
+      content: [...(reference || []), { type: "text", text: buildReviewPrompt(settings.targetLang, items, { withReference: !!reference, names, listNames }) }],
     });
   } catch (err) {
     if (err.name === "AbortError") throw err;
@@ -1332,6 +1406,9 @@ async function reviewChunk(settings, model, chunk, draft, tag, signal, page) {
   for (const c of fixes) {
     log(`${tag}校對第 ${c.id + 1} 段\n  初稿：${texts.get(c.id)}\n  改為：${c.text}`);
     texts.set(c.id, c.text);
+  }
+  if (listNames && Array.isArray(out.names)) {
+    await saveNames(page, out.names, tag).catch((err) => log(`${tag}人名對照表沒有存下來：${err.message || err}`));
   }
   return { ...draft, translations: [...texts].map(([id, text]) => ({ id, text })) };
 }
