@@ -2,6 +2,8 @@
 
 # Kindle Auto-Translate (Chrome extension)
 
+[![Tests](https://github.com/ctchuang/kindle-translator/actions/workflows/test.yml/badge.svg)](https://github.com/ctchuang/kindle-translator/actions/workflows/test.yml)
+
 Reads Kindle Cloud Reader's own page data (read.amazon.com and others) to know which page is on screen and which words form a paragraph, reads the text with local OCR (Tesseract), and has Claude Haiku translate it into Traditional Chinese, with Sonnet reviewing the translation. The translation is drawn directly over the original text on the page, and also shown in Chrome's side panel. While you read a page, the next one is translated ahead, so it's there as soon as you turn to it.
 
 ![Example: a two-page spread of Build a Reasoning Model (From Scratch), with the body text and captions translated in place and figures 1.1 and 1.2 left as they are, and the side panel on the right](docs/example.png)
@@ -139,6 +141,8 @@ node --test --watch "tests/**/*.test.js"                  # rerun on every chang
 ```
 
 The tests load the extension's files unchanged and replace everything around them (Chrome APIs, the Kindle page, OCR, the Claude API, the DOM) with fakes, so they need no browser, API key or network, and take about 20 seconds. A synthetic book stands in for Kindle's page data (Amazon's fonts can't go into the repo), and a fake canvas that really fills pixels lets the pixel-by-pixel page recognition be tested too. What Tesseract actually reads and how the reader really draws aren't covered; check those on Kindle Cloud Reader itself. How the tests are built is in section 11 of [docs/design.md](docs/design.md) (in Chinese).
+
+GitHub Actions runs every test on Node 22 and 24 for each push and pull request (`.github/workflows/test.yml`).
 
 After changing the extension, reload it on `chrome://extensions`, then reload the Kindle tab.
 

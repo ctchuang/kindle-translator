@@ -2,6 +2,8 @@
 
 # Kindle 自動翻譯（Chrome extension）
 
+[![Tests](https://github.com/ctchuang/kindle-translator/actions/workflows/test.yml/badge.svg)](https://github.com/ctchuang/kindle-translator/actions/workflows/test.yml)
+
 讀取 Kindle Cloud Reader（read.amazon.com 等）自己的頁面資料，知道畫面上是哪一頁、哪些字是同一段，用本機 OCR（Tesseract）辨識文字，再交給 Claude Haiku 翻譯、Sonnet 校對成繁體中文。譯文直接蓋在書頁原文的位置上，也同時顯示在 Chrome 側邊欄。讀目前這一頁時，下一頁會先翻好，翻過去就直接出現。
 
 ![範例：《Build a Reasoning Model (From Scratch)》雙頁版面，內文和圖說的譯文蓋在原文位置上，圖 1.1、1.2 保留原圖，右側是側邊欄](docs/example.png)
@@ -137,6 +139,8 @@ node --test --watch "tests/**/*.test.js"                  # 改程式時自動�
 ```
 
 測試把擴充功能的檔案原封不動地載入，周圍的 Chrome API、Kindle 頁面、OCR、Claude API 和 DOM 都換成假的，所以不需要瀏覽器、API key 或網路，跑一次約 20 秒。Kindle 的頁面資料用一本合成的書代替（Amazon 的字型不能放進 repo），canvas 是真的會填像素的假 canvas，所以辨識頁面的逐像素比對也測得到。Tesseract 的實際輸出和閱讀器真正的畫法不在測試範圍內，要在實際的 Kindle Cloud Reader 上確認。測試的架構見 [docs/design.md](docs/design.md) 第 11 節。
+
+GitHub Actions 在每次 push 和 PR 時用 Node 22、24 跑一次全部測試（`.github/workflows/test.yml`）。
 
 改動擴充功能後，到 `chrome://extensions` 按擴充功能的重新載入，再重新整理 Kindle 分頁。
 
