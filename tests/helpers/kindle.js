@@ -157,8 +157,20 @@ function layoutBook(book, { fontSize = 10, width = 300, height = 200, columns = 
       offset += word.length + 1;
     }
     if (line) lines.push({ text: line, offset: lineStart });
-    for (const l of lines) {
+    // A paragraph in a shaded box (a sidebar or note) gets a "group" with a
+    // fillStroke decoration around its lines on each screen; a link's first
+    // line a "textline" with a linkLine underline, as the reader sends them.
+    let box = null;
+    const closeBox = () => {
+      if (!box) return;
+      box.group.backDecoration[0].rect.bottom = box.bottom - box.group.transform[5] + 3;
+      box = null;
+    };
+    for (const [li, l] of lines.entries()) {
+      const before = screen;
+      const beforeCol = col;
       room(pitch(size));
+      if (box && (screen !== before || col !== beforeCol)) closeBox();
       const baseline = y + size;
       const glyphs = [...l.text].map((ch) => ch.charCodeAt(0));
       const xPosition = [];
@@ -187,10 +199,34 @@ function layoutBook(book, { fontSize = 10, width = 300, height = 200, columns = 
         glyphs,
         xPosition,
       });
+      if (p.box) {
+        if (!box) {
+          const group = {
+            type: "group",
+            transform: [1, 0, 0, 1, colLeft(col), y],
+            elementId: p.elementId,
+            rect: { top: -3, left: -3, bottom: 0, right: colWidth + 3 },
+            backDecoration: [{ type: "fillStroke", rect: { top: -3, left: -3, bottom: 0, right: colWidth + 3 }, fillColor: "#e6e6e6ff", backgroundColor: "#000000ff" }],
+          };
+          screen.children.unshift(group);
+          box = { group, bottom: y };
+        }
+        box.bottom = y + pitch(size);
+      }
+      if (p.link && li === 0) {
+        screen.children.push({
+          type: "textline",
+          transform: [1, 0, 0, 1, colLeft(col), y],
+          elementId: p.elementId,
+          rect: { top: 0, left: 0, bottom: pitch(size), right: colWidth },
+          backDecoration: [{ type: "linkLine", strokeStartPoint: { x: 0, y: size * 1.15 }, strokeEndPoint: { x: +x.toFixed(4), y: size * 1.15 }, strokeWidth: 1, strokeColor: "#0000ffff" }],
+        });
+      }
       lineText.set(start, l.text);
       touch(start, end);
       y += pitch(size);
     }
+    closeBox();
   }
   const runsOf = (list) => list.flatMap((s) => s.children.filter((c) => c.type === "run"));
   // Like the reader's, each response numbers the glyphs it carries afresh,

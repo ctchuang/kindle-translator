@@ -309,7 +309,6 @@ function ensureRoot() {
   Object.assign(root.style, {
     position: "fixed",
     inset: "0",
-    zIndex: "2147483647",
     pointerEvents: "none", // clicks still reach the reader (page turns, menus)
   });
   if (!enabled) root.style.display = "none";
@@ -358,10 +357,25 @@ function overlayBoxes(msg) {
   return out;
 }
 
+// Just above the page image and below the reader's own toolbar and menus
+// (its settings panel slides over the page): one level above the page
+// image's outermost positioned ancestor with a z-index, which is how the
+// reader stacks the page under its app (the page at -3, the app at 0). The
+// very top when the page image has no such ancestor.
+function overlayZ() {
+  let z = null;
+  for (let el = pageImage(); el && el !== document.documentElement; el = el.parentElement) {
+    const cs = getComputedStyle(el);
+    if (cs.position !== "static" && cs.zIndex !== "auto" && Number.isFinite(Number(cs.zIndex))) z = Number(cs.zIndex);
+  }
+  return z === null ? "2147483647" : String(z + 1);
+}
+
 function drawOverlay(msg) {
   const boxes = overlayBoxes(msg);
   if (!boxes) return "看不到書頁圖片";
   if (!boxes.length) return "這一頁沒有可以畫的譯文";
+  ensureRoot().style.zIndex = overlayZ();
   showOverlay(boxes);
   lastOverlay = msg;
   return null;

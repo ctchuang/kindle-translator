@@ -381,7 +381,7 @@ test.describe("renderPage", () => {
     const c = R.renderPage(b.pages[0], b.fonts, 2);
     assert.equal(c.width, 600);
     assert.equal(c.height, 400);
-    assert.deepEqual(c.ops[0], { op: "fillRect", x: 0, y: 0, w: 600, h: 400, color: "#ffffff" });
+    assert.deepEqual(c.ops[0], { op: "fillRect", x: 0, y: 0, w: 600, h: 400, color: "#ffffff", transform: [1, 0, 0, 1, 0, 0] });
   });
 
   test("each glyph is filled at its run's transform, x position and font size", () => {
@@ -455,6 +455,84 @@ test.describe("renderPage", () => {
       const shot = raster.readerPixels(page, b.fonts, 2);
       assert.equal(R.pixelDiff(pixels(page, b.fonts), shot.data, shot.width, R.imageMasks(page, 2)), 0);
     }
+  });
+});
+
+// ---- decorations: shaded boxes and link underlines ----
+
+test.describe("decorations", () => {
+  const book = makeBook({
+    paragraphs: [
+      ...Array.from({ length: 4 }, (_, i) => `${words(i, 30)}.`),
+      { text: `${words(9, 60)}.`, box: true },
+      { text: `${words(10, 30)}.`, link: true },
+      ...Array.from({ length: 6 }, (_, i) => `${words(i + 20, 30)}.`),
+    ],
+  });
+  const L = book.layout();
+  const page = L.screens.find((s) => s.children.some((c) => c.type === "group"));
+  const box = { type: "group", transform: [1, 0, 0, 1, 20, 30], rect: { top: -3, left: -3, bottom: 50, right: 103 }, backDecoration: [{ type: "fillStroke", rect: { top: -3, left: -3, bottom: 50, right: 103 }, fillColor: "#e6e6e6ff" }] };
+  const link = { type: "textline", transform: [1, 0, 0, 1, 10, 100], rect: { top: 0, left: 0, bottom: 14, right: 200 }, backDecoration: [{ type: "linkLine", strokeStartPoint: { x: 5, y: 12 }, strokeEndPoint: { x: 85, y: 12 }, strokeWidth: 1, strokeColor: "#0000ffff" }] };
+
+  test("decorations lists what the reader draws behind items, by type", () => {
+    const p = screen([box, link, run()]);
+    assert.deepEqual(
+      R.decorations(p).map((x) => x.deco.type),
+      ["fillStroke", "linkLine"]
+    );
+    assert.equal(R.decorations(p, "fillStroke")[0].item, box);
+    assert.deepEqual(R.decorations(screen([run(), { type: "group", backDecoration: "odd" }])), []);
+  });
+
+  test("a shaded box is filled behind the text in its colour, under its item's transform", () => {
+    const fonts = { f: { unitsPerEm: 1000, glyphs: { 119: { path: "M0,0 L1,1 Z" } } } };
+    const ops = R.renderPage(screen([run({ text: "w" }), box]), fonts, 2).ops;
+    assert.deepEqual(ops[1], { op: "fillRect", x: -3, y: -3, w: 106, h: 53, color: "#e6e6e6", transform: [2, 0, 0, 2, 40, 60] });
+    assert.equal(ops[2].op, "fill", "the text comes after the box");
+  });
+
+  test("a box without its own rect uses its item's; a missing colour is the reader's grey", () => {
+    const bare = { ...box, backDecoration: [{ type: "fillStroke" }] };
+    const [, fill] = R.renderPage(screen([bare]), {}, 1).ops;
+    assert.deepEqual([fill.x, fill.y, fill.w, fill.h, fill.color], [-3, -3, 106, 53, "#e6e6e6"]);
+  });
+
+  test("plain drawings (for OCR) leave the boxes out", () => {
+    assert.equal(R.renderPage(screen([box]), {}, 1, new Map(), { plain: true }).ops.length, 1);
+  });
+
+  test("link underlines aren't drawn", () => {
+    assert.equal(R.renderPage(screen([link]), {}, 1).ops.length, 1);
+  });
+
+  test("compareMasks: the illustrations, a band along each box edge, and each link underline", () => {
+    const img = { type: "image", transform: [1, 0, 0, 1, 200, 20], rect: { top: 0, left: 0, bottom: 10, right: 10 } };
+    const masks = R.compareMasks(screen([img, box, link]), 2);
+    assert.equal(masks.length, 1 + 4 + 1);
+    assert.deepEqual(masks[0], R.imageMasks(screen([img]), 2)[0]);
+    // The box spans x 34–246, y 54–160 at ×2; bands reach 4 px either side.
+    assert.deepEqual(masks[1], [30, 50, 250, 58], "top edge");
+    assert.deepEqual(masks[2], [30, 156, 250, 164], "bottom edge");
+    assert.deepEqual(masks[3], [30, 50, 38, 164], "left edge");
+    assert.deepEqual(masks[4], [242, 50, 250, 164], "right edge");
+    // The underline at y 112 (×2 = 224), x 15–95 (×2 = 30–190), 2 px thick.
+    assert.deepEqual(masks[5], [26, 218, 194, 230]);
+  });
+
+  test("a screen with a box and a link is still found, edges rounded and underline drawn by the reader", () => {
+    const b = batch(L, 0, 6);
+    const target = b.pages[L.screens.indexOf(page)];
+    const shot = raster.readerPixels(page, L.fonts, 2);
+    const hit = R.identifyScreen(shot, b.pages, (p) => pixels(p, b.fonts), 2);
+    assert.equal(hit?.page, target);
+    // Compared without the decoration bands, the same screen doesn't match.
+    assert.ok(R.pixelDiff(pixels(target, b.fonts), shot.data, shot.width, R.imageMasks(target, 2)) > R.SAME_SCREEN_MAX_DIFF);
+  });
+
+  test("decorated items don't change the paragraphs or columns", () => {
+    const plainRuns = { ...page, children: page.children.filter((c) => c.type === "run") };
+    assert.deepEqual(R.pageParagraphs(page), R.pageParagraphs(plainRuns));
+    assert.deepEqual(R.pageColumns(page), R.pageColumns(plainRuns));
   });
 });
 

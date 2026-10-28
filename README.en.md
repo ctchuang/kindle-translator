@@ -58,6 +58,9 @@ Translations are kept per paragraph, by the paragraph's position in the book, wh
 
 ## Release notes
 
+- **2.0.2**:
+  - Fixed pages with shaded boxes or links (as in technical books) not being recognised: the shaded boxes are drawn from the page data, and box edges and link underlines are left out of the comparison.
+  - The translation no longer covers the reader's toolbar and settings panel.
 - **2.0.1**: fixes to 2.0.0.
   - Pressing 「翻譯這一頁」 (translate this page) while the page is being translated now waits for it instead of cancelling and paying again.
   - Paragraphs Claude leaves blank as noise are cached too, so turning back or translating ahead doesn't ask for them again.

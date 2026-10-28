@@ -193,15 +193,27 @@ function pageParagraphs(page) {
 }
 
 // Draw the screen's text at `scale` × its CSS size, on its own background,
-// the way the reader does: each glyph's outline at its run's transform, its
-// x position and the font size. Illustrations aren't drawn. `paths` caches
-// Path2D objects (fontKey:glyph → Path2D) across calls. `plain` draws black
-// on white whatever the theme, which OCR reads best.
+// the way the reader does: the shaded boxes behind sidebars and notes
+// (backDecoration "fillStroke"), then each glyph's outline at its run's
+// transform, its x position and the font size. Illustrations and link
+// underlines aren't drawn (see compareMasks). `paths` caches Path2D objects
+// (fontKey:glyph → Path2D) across calls. `plain` draws black on white
+// whatever the theme, and no boxes, which OCR reads best.
 function renderPage(page, fonts, scale, paths = new Map(), { plain = false } = {}) {
   const canvas = new OffscreenCanvas(Math.round(page.width * scale), Math.round(page.height * scale));
   const ctx = canvas.getContext("2d");
   ctx.fillStyle = plain ? "#ffffff" : cssColor(page.fillColor, "#ffffff");
   ctx.fillRect(0, 0, canvas.width, canvas.height);
+  if (!plain) {
+    for (const { item, deco } of decorations(page, "fillStroke")) {
+      const [a, , , d, e, f] = item.transform;
+      const r = deco.rect ?? item.rect;
+      ctx.setTransform(scale * a, 0, 0, scale * d, scale * e, scale * f);
+      ctx.fillStyle = cssColor(deco.fillColor, "#e6e6e6");
+      ctx.fillRect(r.left, r.top, r.right - r.left, r.bottom - r.top);
+    }
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+  }
   for (const run of runsOf(page)) {
     const font = fonts[run.fontKey];
     if (!font) continue;
@@ -230,6 +242,44 @@ function imageMasks(page, scale) {
     const b = boxOf(img);
     return [Math.floor(b.x0 * scale) - 1, Math.floor(b.y0 * scale) - 1, Math.ceil(b.x1 * scale) + 1, Math.ceil(b.y1 * scale) + 1];
   });
+}
+
+// The decorations the reader draws behind items ({ item, deco }), of `type`
+// if given: "fillStroke" (a shaded box behind a sidebar or note) or
+// "linkLine" (a link's underline).
+function decorations(page, type) {
+  return page.children.flatMap((item) =>
+    (Array.isArray(item.backDecoration) ? item.backDecoration : []).filter((d) => !type || d.type === type).map((deco) => ({ item, deco }))
+  );
+}
+
+// Pixel rectangles left out when comparing a screen with the reader's image:
+// the illustrations, a band along each edge of a shaded box (the reader
+// rounds those edges a pixel or so differently), and link underlines (a
+// pixel thick, never placed quite the same).
+function compareMasks(page, scale) {
+  const masks = imageMasks(page, scale);
+  const band = Math.ceil(scale) + 2;
+  for (const { item, deco } of decorations(page)) {
+    const [a, , , d, e, f] = item.transform;
+    const X = (v) => scale * (e + a * v);
+    const Y = (v) => scale * (f + d * v);
+    if (deco.type === "fillStroke") {
+      const r = deco.rect ?? item.rect;
+      const [x0, y0, x1, y1] = [X(r.left), Y(r.top), X(r.right), Y(r.bottom)];
+      const edge = (ax, ay, bx, by) => masks.push([Math.floor(ax) - band, Math.floor(ay) - band, Math.ceil(bx) + band, Math.ceil(by) + band]);
+      edge(x0, y0, x1, y0);
+      edge(x0, y1, x1, y1);
+      edge(x0, y0, x0, y1);
+      edge(x1, y0, x1, y1);
+    } else if (deco.type === "linkLine" && deco.strokeStartPoint && deco.strokeEndPoint) {
+      const xs = [X(deco.strokeStartPoint.x), X(deco.strokeEndPoint.x)];
+      const ys = [Y(deco.strokeStartPoint.y), Y(deco.strokeEndPoint.y)];
+      const w = (deco.strokeWidth || 1) * scale;
+      masks.push([Math.floor(Math.min(...xs)) - band, Math.floor(Math.min(...ys) - w) - band, Math.ceil(Math.max(...xs)) + band, Math.ceil(Math.max(...ys) + w) + band]);
+    }
+  }
+  return masks;
 }
 
 // Share of the pixels outside `masks` whose colour differs between two RGBA
@@ -274,10 +324,9 @@ function identifyScreen(shot, candidates, draw, scale) {
   for (const page of candidates) {
     if (Math.round(page.width * scale) !== shot.width || Math.round(page.height * scale) !== shot.height) continue;
     tried++;
-    const masks = imageMasks(page, scale);
-    const diff = pixelDiff(draw(page), shot.data, shot.width, masks, SAME_SCREEN_MAX_DIFF);
+    const diff = pixelDiff(draw(page), shot.data, shot.width, compareMasks(page, scale), SAME_SCREEN_MAX_DIFF);
     if (diff > SAME_SCREEN_MAX_DIFF) continue;
-    if (maskedShare(masks, shot.width, shot.height) <= MOSTLY_MASKED) return { page, diff, tried };
+    if (maskedShare(imageMasks(page, scale), shot.width, shot.height) <= MOSTLY_MASKED) return { page, diff, tried };
     weak ??= { page, diff };
   }
   return weak && { ...weak, tried };
@@ -365,6 +414,8 @@ if (typeof module !== "undefined") {
     pageParagraphs,
     renderPage,
     imageMasks,
+    decorations,
+    compareMasks,
     pixelDiff,
     maskedShare,
     identifyScreen,

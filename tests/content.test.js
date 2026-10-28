@@ -287,6 +287,16 @@ test("the count of screens compared leaves out those of another size", async (t)
   assert.ok(msg.tried <= 6, `tried ${msg.tried}`);
 });
 
+test("a screen with a shaded box and a link underline is identified", async (t) => {
+  const s = setup(t);
+  const decorated = makeBook({
+    paragraphs: [...Array.from({ length: 4 }, (_, i) => `${words(i, 30)}.`), { text: `${words(9, 60)}.`, box: true }, { text: `${words(10, 30)}.`, link: true }, ...Array.from({ length: 6 }, (_, i) => `${words(i + 20, 30)}.`)],
+  }).layout();
+  const i = decorated.screens.findIndex((sc) => sc.children.some((c) => c.type === "group"));
+  await deliver(s, decorated, 0, 6);
+  assert.equal((await show(s, decorated, i)).page.start, decorated.screens[i].startPositionId);
+});
+
 test("candidates nearest the previous screen are tried first", async (t) => {
   const s = setup(t);
   await deliver(s, L, 0, 12);
@@ -571,6 +581,31 @@ test("an overlay for the screen on show is drawn over the page image", async (t)
   assert.deepEqual([a.style.background, a.style.color], ["#fafafa", "#111111"]);
   assert.deepEqual([single.style.background, single.style.color], ["#fafafa", "#222222"]);
   assert.equal(a.textContent, BLOCKS[1].text);
+});
+
+test("the overlay sits just above the page, below the reader's toolbar and menus", async (t) => {
+  // As in Kindle Cloud Reader: the page container at z-index -3, the app
+  // (toolbar, settings panel) at 0.
+  const html = '<html><body><div id="app" style="position:fixed;z-index:0"></div><div id="c" class="kr-renderer-container-fullpage"><div id="kr-renderer"><div class="kg-full-page-img"><img /></div></div></div></body></html>';
+  const s = await ready(t, { html });
+  Object.assign(s.page.$("c").style, { position: "absolute", zIndex: "-3" });
+  draw(s, overlayMsg(s.shown, BLOCKS));
+  assert.equal(s.overlay().style.zIndex, "-2");
+});
+
+test("the outermost stacking ancestor of the page image decides the overlay's level", async (t) => {
+  const html = '<html><body><div id="outer"><div id="inner"><div class="kg-full-page-img"><img /></div></div></div></body></html>';
+  const s = await ready(t, { html });
+  Object.assign(s.page.$("outer").style, { position: "relative", zIndex: "5" });
+  Object.assign(s.page.$("inner").style, { position: "absolute", zIndex: "100" });
+  draw(s, overlayMsg(s.shown, BLOCKS));
+  assert.equal(s.overlay().style.zIndex, "6");
+});
+
+test("without a stacking ancestor, the overlay goes on top", async (t) => {
+  const s = await ready(t);
+  draw(s, overlayMsg(s.shown, BLOCKS));
+  assert.equal(s.overlay().style.zIndex, "2147483647");
 });
 
 test("page pixels are mapped through where the reader draws the page image", async (t) => {

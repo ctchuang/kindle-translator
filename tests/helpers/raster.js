@@ -52,8 +52,11 @@ class OffscreenCanvas {
         t = [a, b, c, d, e, f];
       },
       fillRect(x, y, w, h) {
-        canvas.ops.push({ op: "fillRect", x, y, w, h, color: this.fillStyle });
-        fillBox(x, y, x + w, y + h, this.fillStyle);
+        canvas.ops.push({ op: "fillRect", x, y, w, h, color: this.fillStyle, transform: [...t] });
+        const [a, , , d, e, f] = t;
+        const xs = [a * x + e, a * (x + w) + e];
+        const ys = [d * y + f, d * (y + h) + f];
+        fillBox(Math.min(...xs), Math.min(...ys), Math.max(...xs), Math.max(...ys), this.fillStyle);
       },
       fill(path) {
         canvas.ops.push({ op: "fill", d: path.d, transform: [...t], color: this.fillStyle });
@@ -96,7 +99,9 @@ class OffscreenCanvas {
 }
 
 // What the reader shows for a screen: its text drawn the same way, plus its
-// illustrations (which the extension doesn't draw) as speckled grey.
+// illustrations (which the extension doesn't draw) as speckled grey, the
+// shaded boxes' top and left edges a pixel further out (the reader rounds
+// them differently, as measured on a real book), and link underlines.
 function readerPixels(page, fonts, scale) {
   const { renderPage, imageMasks } = require("../../page-render.js");
   const prev = { OffscreenCanvas: global.OffscreenCanvas, Path2D: global.Path2D };
@@ -104,6 +109,31 @@ function readerPixels(page, fonts, scale) {
   global.Path2D = Path2D;
   try {
     const canvas = renderPage(page, fonts, scale);
+    const paint = (x0, y0, x1, y1, [r, g, b]) => {
+      for (let y = Math.max(0, Math.round(y0)); y < Math.min(canvas.height, Math.round(y1)); y++) {
+        for (let x = Math.max(0, Math.round(x0)); x < Math.min(canvas.width, Math.round(x1)); x++) {
+          const i = (y * canvas.width + x) * 4;
+          canvas.data[i] = r;
+          canvas.data[i + 1] = g;
+          canvas.data[i + 2] = b;
+        }
+      }
+    };
+    for (const c of page.children) {
+      for (const d of c.backDecoration || []) {
+        const [a, , , dd, e, f] = c.transform;
+        if (d.type === "fillStroke") {
+          const x0 = scale * (e + a * d.rect.left);
+          const y0 = scale * (f + dd * d.rect.top);
+          const x1 = scale * (e + a * d.rect.right);
+          paint(x0 - 1, y0 - 1, x1, y0, [230, 230, 230]);
+          paint(x0 - 1, y0 - 1, x0, scale * (f + dd * d.rect.bottom), [230, 230, 230]);
+        } else if (d.type === "linkLine") {
+          const y = scale * (f + dd * d.strokeStartPoint.y);
+          paint(scale * (e + a * d.strokeStartPoint.x), y, scale * (e + a * d.strokeEndPoint.x), y + scale * (d.strokeWidth || 1), [0, 0, 255]);
+        }
+      }
+    }
     for (const [x0, y0, x1, y1] of imageMasks(page, scale)) {
       for (let y = Math.max(0, y0 + 1); y < Math.min(canvas.height, y1 - 1); y++) {
         for (let x = Math.max(0, x0 + 1); x < Math.min(canvas.width, x1 - 1); x++) {

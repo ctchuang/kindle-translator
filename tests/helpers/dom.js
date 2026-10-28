@@ -504,6 +504,8 @@ function loadPage(files, { chrome, html, innerWidth = 1000, innerHeight = 800, t
     Event,
     MutationObserver: makeMutationObserver(observers),
     requestAnimationFrame: (cb) => frames.push(cb),
+    // Only what content.js reads: position and z-index, from inline styles.
+    getComputedStyle: (el) => ({ position: el.style.position || "static", zIndex: el.style.zIndex === undefined || el.style.zIndex === "" ? "auto" : String(el.style.zIndex) }),
     cancelAnimationFrame: () => {},
     // Same speed-up as load.js, but remembered so `close()` can stop them.
     setTimeout: (cb, ms = 0, ...args) => track(setTimeout(cb, Math.max(0, ms / TIME_SCALE), ...args)),
