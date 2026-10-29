@@ -218,7 +218,7 @@ function pageParagraphs(page) {
 // Draw the screen's text at `scale` × its CSS size, on its own background,
 // the way the reader does: the shaded boxes behind sidebars and notes
 // (backDecoration "fillStroke"), then each glyph's outline at its run's
-// transform, its x position and the font size. Illustrations and link
+// transform, its x position and the font size. Illustrations and
 // underlines aren't drawn (see compareMasks). `paths` caches Path2D objects
 // (fontKey:glyph → Path2D) across calls. `plain` draws black on white
 // whatever the theme, and no boxes, which OCR reads best.
@@ -268,8 +268,9 @@ function imageMasks(page, scale) {
 }
 
 // The decorations the reader draws behind items ({ item, deco }), of `type`
-// if given: "fillStroke" (a shaded box behind a sidebar or note) or
-// "linkLine" (a link's underline).
+// if given: "fillStroke" (a shaded box behind a sidebar or note),
+// "linkLine" (a link's underline) or "line" (an underline, as under a book
+// title).
 function decorations(page, type) {
   return page.children.flatMap((item) =>
     (Array.isArray(item.backDecoration) ? item.backDecoration : []).filter((d) => !type || d.type === type).map((deco) => ({ item, deco }))
@@ -278,8 +279,8 @@ function decorations(page, type) {
 
 // Pixel rectangles left out when comparing a screen with the reader's image:
 // the illustrations, a band along each edge of a shaded box (the reader
-// rounds those edges a pixel or so differently), and link underlines (a
-// pixel thick, never placed quite the same).
+// rounds those edges a pixel or so differently), and underlines, of links or
+// not (a pixel thick, never placed quite the same).
 function compareMasks(page, scale) {
   const masks = imageMasks(page, scale);
   const band = Math.ceil(scale) + 2;
@@ -295,7 +296,7 @@ function compareMasks(page, scale) {
       edge(x0, y1, x1, y1);
       edge(x0, y0, x0, y1);
       edge(x1, y0, x1, y1);
-    } else if (deco.type === "linkLine" && deco.strokeStartPoint && deco.strokeEndPoint) {
+    } else if ((deco.type === "linkLine" || deco.type === "line") && deco.strokeStartPoint && deco.strokeEndPoint) {
       const xs = [X(deco.strokeStartPoint.x), X(deco.strokeEndPoint.x)];
       const ys = [Y(deco.strokeStartPoint.y), Y(deco.strokeEndPoint.y)];
       const w = (deco.strokeWidth || 1) * scale;

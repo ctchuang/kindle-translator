@@ -385,6 +385,8 @@ test("a screen missing from the data is reported, and found once its batch comes
   await deliver(s, L, 0, 6);
   const msg = await show(s, L, 8);
   assert.equal(msg.error, "閱讀器的頁面資料裡找不到目前這一頁");
+  // The log says why: the image's size, and each layout's screens.
+  assert.match(s.sent("pageLog").at(-1).text, /^辨識不到：書頁圖片 \d+×\d+（devicePixelRatio .+），上一頁位置 .+；版面 1（rasterScale \d+，6 個畫面，位置 \d+–\d+，畫出來 .+）尺寸相符 \d+ 個/);
   await deliver(s, L, 6, 6);
   await waitFor(() => s.sent("pageShown").length === 2, { what: "found" });
   assert.equal(s.sent("pageShown")[1].page.start, L.screens[8].startPositionId);

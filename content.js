@@ -115,8 +115,9 @@ function identify() {
       if (mine !== latest) return;
       const found = await findScreen(img);
       if (mine !== latest) return;
-      if (!found) {
+      if (found.miss) {
         failed = layouts.size ? "閱讀器的頁面資料裡找不到目前這一頁" : "還沒收到閱讀器的頁面資料，請重新整理 Kindle 分頁";
+        if (layouts.size) pageLog(found.miss);
         report({ error: failed });
         return;
       }
@@ -163,7 +164,32 @@ async function findScreen(img) {
     // Only those of the image's size were drawn and compared.
     tried += candidates.filter((p) => Math.round(p.width * scale) === shot.width && Math.round(p.height * scale) === shot.height).length;
   }
-  return null;
+  return { miss: missReport(shot) };
+}
+
+const MISS_DIFF_LIMIT = 0.05;
+
+// Why no screen matched, for the log: the image's size against each layout's
+// screens, and how far off the closest three of the right size were.
+function missReport(shot) {
+  const parts = [...layouts.values()].reverse().map((layout, i) => {
+    const scale = scaleOf(layout);
+    const pages = [...layout.pages.values()];
+    const starts = pages.map((p) => p.startPositionId);
+    const sizes = [...new Set(pages.map((p) => `${Math.round(p.width * scale)}×${Math.round(p.height * scale)}`))];
+    const fits = pages.filter((p) => Math.round(p.width * scale) === shot.width && Math.round(p.height * scale) === shot.height);
+    let text = `版面 ${i + 1}（rasterScale ${scale}，${pages.length} 個畫面，位置 ${Math.min(...starts)}–${Math.max(...starts)}，畫出來 ${sizes.join("、")}）尺寸相符 ${fits.length} 個`;
+    if (fits.length) {
+      // Past 5% it's plainly another screen: stop counting there.
+      const closest = fits
+        .map((p) => ({ start: p.startPositionId, diff: pixelDiff(pixelsOf(layout, p, scale), shot.data, shot.width, compareMasks(p, scale), MISS_DIFF_LIMIT) }))
+        .sort((a, b) => a.diff - b.diff)
+        .slice(0, 3);
+      text += `，最接近的：${closest.map((c) => `位置 ${c.start} 差 ${c.diff > MISS_DIFF_LIMIT ? `>${MISS_DIFF_LIMIT * 100}` : (c.diff * 100).toFixed(2)}%`).join("、")}`;
+    }
+    return text;
+  });
+  return `辨識不到：書頁圖片 ${shot.width}×${shot.height}（devicePixelRatio ${globalThis.devicePixelRatio ?? "?"}），上一頁位置 ${lastStart ?? "無"}；${parts.join("；")}`;
 }
 
 function scaleOf(layout) {

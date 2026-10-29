@@ -576,6 +576,11 @@ test.describe("decorations", () => {
     assert.deepEqual(masks[5], [26, 218, 194, 230]);
   });
 
+  test("compareMasks: an underline that isn't a link's (a book title's) is left out the same way", () => {
+    const title = { ...link, backDecoration: [{ ...link.backDecoration[0], type: "line", strokeColor: "#000000ff" }] };
+    assert.deepEqual(R.compareMasks(screen([title]), 2), R.compareMasks(screen([link]), 2));
+  });
+
   test("a screen with a box and a link is still found, edges rounded and underline drawn by the reader", () => {
     const b = batch(L, 0, 6);
     const target = b.pages[L.screens.indexOf(page)];
