@@ -1414,6 +1414,48 @@ test.describe("page data asked for by a test tool", () => {
   });
 });
 
+test.describe("session storage running out", () => {
+  // Chrome refuses the next paragraph write as over its session quota.
+  function refuseOnce(ext, message = "Session storage quota bytes exceeded. Values were not stored.") {
+    const set = ext.chrome.storage.session.set;
+    const state = { refused: 0 };
+    ext.chrome.storage.session.set = async (items) => {
+      if (!state.refused && Object.keys(items).some((k) => k.startsWith("para:"))) {
+        state.refused++;
+        throw new Error(message);
+      }
+      return set(items);
+    };
+    return state;
+  }
+
+  test("the older half goes and the screen is cached and drawn", async () => {
+    const ext = startExtension();
+    for (const i of [0, 1, 2]) await showAndWait(ext, i);
+    const older = ext.cachedParas();
+    const state = refuseOnce(ext);
+    await showAndWait(ext, 3);
+    assert.equal(state.refused, 1);
+    assert.ok(ext.hasLog(/快取空間已滿，丟掉較舊的一半（\d+ 筆）/));
+    assert.equal(ext.tab.overlay.page.start, ext.info(3).start, "drawn");
+    const own = R.pageParagraphs(ext.screen()).map((p) => `para:B0TESTBOOK:rev1:${p.start}-${p.end}`);
+    for (const k of own) assert.ok(ext.session()[k], k);
+    const gone = older.filter((k) => !ext.session()[k]);
+    assert.equal(gone.length, Math.floor((older.length + own.length) / 2), "the older half of the paragraphs, new ones included in the count");
+    assert.deepEqual(gone, older.slice(0, gone.length), "the oldest ones");
+    const { cacheIndex } = ext.session();
+    for (const k of [...cacheIndex.paras, ...cacheIndex.pages]) assert.ok(ext.session()[k], `indexed ${k} is stored`);
+  });
+
+  test("another storage error still fails the screen", async () => {
+    const ext = startExtension();
+    refuseOnce(ext, "disk broken");
+    await showAndWait(ext, 0);
+    assert.ok(ext.msgs("error").some((m) => /disk broken/.test(m.text)));
+    assert.ok(!ext.hasLog(/快取空間已滿/));
+  });
+});
+
 test.describe("reference pages (the review sees the book's earlier paragraphs)", () => {
   const REF = { referencePages: true };
   const refBlocks = (req) => req.body.messages[0].content.slice(0, -1);
@@ -1625,6 +1667,24 @@ test.describe("the book's name list", () => {
     assert.ok(!ext.hasLog(/人名對照表：這一頁用到/), "the expired Graff isn't sent");
     assert.deepEqual(names(ext), {});
     assert.ok(!ext.chrome.storage.local.data.has("names:B0OLD:r"));
+  });
+
+  test("a name the review translated otherwise is put back to the listed one", async () => {
+    const ext = startExtension({
+      book: namedBook(),
+      settings: REF,
+      claude: (req) =>
+        req.kind === "translate"
+          ? { json: { translations: req.items.map((p) => ({ id: p.id, text: `譯：${p.text.replace(/Graff/g, "葛拉夫")}` })), notes: "", summarized: false } }
+          : req.kind === "review" && { json: { corrections: [], notes: "", names: [{ source: "Graff", text: "葛拉夫" }] } },
+    });
+    await ext.chrome.storage.local.set({ "names:B0TESTBOOK:rev1": { names: { Graff: { text: "格拉夫", savedAt: Date.now() } } } });
+    await showAndWait(ext, 0);
+    const drawn = ext.overlaysSent()[0].blocks.map((b) => b.text).join("\n");
+    assert.match(drawn, /格拉夫/);
+    assert.doesNotMatch(drawn, /葛拉夫/);
+    assert.ok(ext.hasLog(/譯文裡的人名改回對照表的譯名（\d+ 處）/));
+    assert.ok(Object.values(ext.session()).every((v) => !JSON.stringify(v).includes("葛拉夫")), "the cache has the listed name too");
   });
 
   test("an Opus fallback translation gets the names too", async () => {

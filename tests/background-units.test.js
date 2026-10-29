@@ -353,3 +353,30 @@ test.describe("visionParas", () => {
     );
   });
 });
+
+test.describe("restoreNames", () => {
+  const ctx = worker();
+  const run = (conflicts, items, texts) => {
+    const map = new Map(Object.entries(texts).map(([k, v]) => [Number(k), v]));
+    const n = ctx.restoreNames(conflicts, items, map);
+    return { n, texts: Object.fromEntries(map) };
+  };
+
+  test("puts the listed name back where the name appears", () => {
+    const out = run([{ source: "Graff", text: "葛拉夫", kept: "格拉夫" }], [{ id: 0, source: "Graff said." }, { id: 1, source: "Ender said." }], { 0: "葛拉夫說，葛拉夫笑了。", 1: "恩德說：葛拉夫。" });
+    assert.equal(out.n, 2);
+    assert.deepEqual(out.texts, { 0: "格拉夫說，格拉夫笑了。", 1: "恩德說：葛拉夫。" });
+  });
+
+  test("leaves one-character names, and names inside the listed one, alone", () => {
+    const items = [{ id: 0, source: "Shen and Graff applied." }];
+    const out = run([{ source: "Shen", text: "申", kept: "沈" }, { source: "Graff", text: "拉夫", kept: "格拉夫" }], items, { 0: "申和格拉夫提出申請。" });
+    assert.equal(out.n, 0);
+    assert.deepEqual(out.texts, { 0: "申和格拉夫提出申請。" });
+  });
+
+  test("a name only as part of another word doesn't count", () => {
+    const out = run([{ source: "Peter", text: "彼德", kept: "彼得" }], [{ id: 0, source: "Peterson came." }], { 0: "彼德森來了。" });
+    assert.equal(out.n, 0);
+  });
+});

@@ -65,6 +65,7 @@ Translations are kept per paragraph, by the paragraph's position in the book, wh
 - **2.3.0**: a list of names per book.
   - With "refer to earlier pages when reviewing" on, each book gets a list of names (original → translation), compiled by Sonnet's review; every later translation (including a column Opus took over) and review follows it, however many pages back a name was first seen. A name already listed keeps its translation; each is kept for 30 days after it was last seen and can be deleted from the options page.
   - The reference's default cap goes down from 16,000 to 10,000 tokens.
+  - Fixed every page failing after about 30 pages read in a row (Chrome's session storage was full): when it's full, the older half of the cache goes.
 - **2.2.0**: the review can refer to earlier pages.
   - New: refer to earlier pages when reviewing (experimental, off by default). Sonnet's review sees the paragraphs of the same book read before, to keep names, terms and tone consistent. They're kept on this computer for a week and can be deleted from the options page.
   - Polished mode now reviews the whole page once both columns are translated, instead of each column separately.

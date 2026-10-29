@@ -221,10 +221,35 @@ function cacheWrite(items) {
     const kept = { ...items };
     for (const key of dropped) delete kept[key]; // past the limit in this very write
     if (dropped.length) await chrome.storage.session.remove(dropped);
-    await chrome.storage.session.set({ ...kept, cacheIndex });
+    try {
+      await chrome.storage.session.set({ ...kept, cacheIndex });
+    } catch (err) {
+      // Chrome caps session storage (10 MB), which the counts above can
+      // outgrow on a long read: then nothing could be cached any more and
+      // every screen failed. Make room and try once more.
+      if (!/quota/i.test(err?.message || "")) throw err;
+      const freed = [];
+      for (const list of [cacheIndex.paras, cacheIndex.pages]) {
+        const older = list.slice(0, Math.floor(list.length / 2)).filter((k) => !(k in items));
+        freed.push(...older);
+        for (const k of older) list.splice(list.indexOf(k), 1);
+      }
+      await chrome.storage.session.remove(freed);
+      log(`快取空間已滿${await sessionBytes()}，丟掉較舊的一半（${freed.length} 筆）`);
+      await chrome.storage.session.set({ ...kept, cacheIndex });
+    }
   });
   cacheChain = run.catch(() => {});
   return run;
+}
+
+// "（用了 9.8 MB）", or nothing when Chrome can't say.
+async function sessionBytes() {
+  try {
+    return `（用了 ${((await chrome.storage.session.getBytesInUse(null)) / 1048576).toFixed(1)} MB）`;
+  } catch (_) {
+    return "";
+  }
 }
 
 async function cacheRead(keys) {
@@ -333,6 +358,26 @@ async function saveNames(page, found, tag) {
   });
   if (res.added.length) log(`${tag}人名對照表新增：${res.added.map((n) => `${n.source} → ${n.text}`).join("、")}`);
   if (res.conflicts.length) log(`${tag}人名對照表已有別的譯法，沿用原本的：${res.conflicts.map((c) => `${c.source} → ${c.kept}（這次是 ${c.text}）`).join("、")}`);
+  return res;
+}
+
+// The review used another translation for a listed name (`conflicts` from
+// mergeNames): put the listed one back in the paragraphs (`items`, { id,
+// source }) where the name appears, in `texts` (id → text). A one-character
+// translation is left alone (申 would hit 申請), as is one inside the
+// listed name (拉夫 in 格拉夫). Returns how many were replaced.
+function restoreNames(conflicts, items, texts) {
+  let n = 0;
+  for (const c of conflicts) {
+    if ([...c.text].length < 2 || c.kept.includes(c.text)) continue;
+    for (const p of items) {
+      const text = texts.get(p.id);
+      if (!text?.includes(c.text) || !namesIn({ [c.source]: { text: c.kept } }, [p.source]).length) continue;
+      n += text.split(c.text).length - 1;
+      texts.set(p.id, text.replaceAll(c.text, c.kept));
+    }
+  }
+  return n;
 }
 
 // Keep the paragraphs of a screen just drawn (OCR engine only).
@@ -801,7 +846,9 @@ async function readScreen(job) {
   });
   if (!res || res.error) throw new Error(`OCR 失敗：${res?.error || "offscreen 文件沒有回應"}`);
   job.controller.signal.throwIfAborted();
-  const toPage = (b) => ({ x0: b.x0 / scale, y0: b.y0 / scale, x1: b.x1 / scale, y1: b.y1 / scale });
+  // A tenth of a pixel is plenty, and keeps the cached screen small.
+  const px = (v) => Math.round((v / scale) * 10) / 10;
+  const toPage = (b) => ({ x0: px(b.x0), y0: px(b.y0), x1: px(b.x1), y1: px(b.y1) });
   const lines = res.columns.flat().map((l) => ({ ...l, ...toPage(l), words: (l.words || []).map((w) => ({ ...w, ...toPage(w) })) }));
   const words = assignWords(lines, data.paragraphs);
   record.paras = data.paragraphs.map((p, i) => ({ start: p.start, end: p.end, kind: p.kind, column: p.column, boxes: p.boxes, fg: p.fg, words: words[i] }));
@@ -1408,7 +1455,9 @@ async function reviewChunk(settings, model, chunk, draft, tag, signal, page, nam
     texts.set(c.id, c.text);
   }
   if (listNames && Array.isArray(out.names)) {
-    await saveNames(page, out.names, tag).catch((err) => log(`${tag}人名對照表沒有存下來：${err.message || err}`));
+    const res = await saveNames(page, out.names, tag).catch((err) => log(`${tag}人名對照表沒有存下來：${err.message || err}`));
+    const n = res ? restoreNames(res.conflicts, items, texts) : 0;
+    if (n) log(`${tag}譯文裡的人名改回對照表的譯名（${n} 處）`);
   }
   return { ...draft, translations: [...texts].map(([id, text]) => ({ id, text })) };
 }
