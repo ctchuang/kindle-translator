@@ -62,6 +62,7 @@ Translations are kept per paragraph, by the paragraph's position in the book, wh
 
 ## Release notes
 
+- **2.3.1**: when Claude answers a page with a summary, the names its review lists no longer go into the name list (a summary isn't kept, like the paragraph cache); when a retry brings a translation, only that try's names are kept.
 - **2.3.0**: a list of names per book.
   - With "refer to earlier pages when reviewing" on, each book gets a list of names (original → translation), compiled by Sonnet's review; every later translation (including a column Opus took over) and review follows it, however many pages back a name was first seen; a column Opus took over is then reviewed by Sonnet too. A name already listed keeps its translation; each is kept for 30 days after it was last seen and can be deleted from the options page.
   - Fixed every page failing after about 30 pages read in a row (Chrome's session storage was full): when it's full, the older half of the cache goes.
