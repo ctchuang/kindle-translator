@@ -116,17 +116,19 @@ const NAMES_MAX_AGE_MS = 30 * 24 * 3600 * 1000;
 const NAMES_MAX = 500;
 
 // `stored` ({ [source]: { text, savedAt } }) with the names the review
-// found on a page ([{ source, text }]). A name already listed keeps its
-// translation, so the first one sticks; a different one comes back in
-// `conflicts`. Returns { names, added, conflicts }.
+// found on a page ([{ source, text }]). Only single names are kept: a full
+// name is split into its given name and surname (splitNames), so the list
+// can't hold "Wiggin → 懷金" and "Ender Wiggin → 安德・維金" side by side; a
+// full name listed before (2.3.0's first build kept them) is dropped. A
+// name already listed keeps its translation, so the first one sticks; a
+// different one comes back in `conflicts`. Returns { names, added,
+// conflicts }.
 function mergeNames(stored, found, now) {
   const names = {};
-  for (const [source, n] of Object.entries(stored || {})) if (now - n.savedAt <= NAMES_MAX_AGE_MS) names[source] = n;
+  for (const [source, n] of Object.entries(stored || {})) if (!/\s/.test(source) && now - n.savedAt <= NAMES_MAX_AGE_MS) names[source] = n;
   const added = [];
   const conflicts = [];
-  for (const f of found || []) {
-    const source = String(f?.source ?? "").trim();
-    const text = String(f?.text ?? "").trim();
+  for (const { source, text } of splitNames(found)) {
     if (!source || !text || source.length > 60 || text.length > 30) continue;
     const had = names[source];
     if (had) {
@@ -143,6 +145,26 @@ function mergeNames(stored, found, now) {
     for (const k of keys.slice(0, keys.length - NAMES_MAX)) delete names[k];
   }
   return { names, added, conflicts };
+}
+
+// Names as single words: "Mazer Rackham" → "梅澤·拉克姆" gives Mazer → 梅澤
+// and Rackham → 拉克姆. A name whose two sides don't split into as many
+// parts (a title: "Mr. Wiggin" → "威金先生") is dropped. A possessive 's
+// is dropped too.
+function splitNames(found) {
+  const out = [];
+  for (const f of found || []) {
+    const source = String(f?.source ?? "").trim().replace(/['’]s$/, "");
+    const text = String(f?.text ?? "").trim();
+    const words = source.split(/\s+/).filter(Boolean);
+    if (words.length <= 1) {
+      out.push({ source, text });
+      continue;
+    }
+    const parts = text.split(/[\s・·•‧．]+/).filter(Boolean);
+    if (parts.length === words.length) words.forEach((w, i) => out.push({ source: w, text: parts[i] }));
+  }
+  return out;
 }
 
 // The listed names that appear, as whole words, in any of `texts`, as

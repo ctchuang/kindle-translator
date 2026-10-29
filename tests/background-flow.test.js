@@ -1578,7 +1578,7 @@ test.describe("the book's name list", () => {
     await showAndWait(ext, 0);
     const want = '[{"source":"Graff","text":"格拉夫"}]';
     for (const r of [...ext.claude.of("translate"), ...ext.claude.of("review")].filter((r) => (r.items || []).some((p) => /Graff/.test(p.text ?? p.source)))) {
-      assert.ok(promptOf(r).includes(`人名一律照這份對照表翻譯（source 是原文，text 是譯名），初稿或譯文不一致時改成對照表的譯名：${want}`), r.kind);
+      assert.ok(promptOf(r).includes(`全名就把各部分的譯名用「・」接起來：${want}`), r.kind);
     }
     assert.ok(ext.hasLog(/人名對照表：這一頁用到 1 個（Graff → 格拉夫）/));
     assert.doesNotMatch(JSON.stringify(ext.claude.calls.map((c) => c.body)), /華倫泰/);
@@ -1599,6 +1599,18 @@ test.describe("the book's name list", () => {
     assert.equal(names(ext).Ender.text, "安德");
     assert.ok(names(ext).Ender.savedAt > before, "seen again, it lives on");
     assert.ok(ext.hasLog(/人名對照表已有別的譯法，沿用原本的：Ender → 安德（這次是 恩德）/));
+  });
+
+  test("a full name the review lists is kept as its parts, and can't override them", async () => {
+    // Seen in the Ender's Game test: "Wiggin → 懷金" and "Ender Wiggin → 安德・維金" both listed.
+    const ext = startExtension({ book: namedBook(), settings: REF, claude: listing([{ source: "Ender Wiggin", text: "安德・維金" }, { source: "Mazer Rackham", text: "梅澤·拉克姆" }]) });
+    await ext.chrome.storage.local.set({
+      "names:B0TESTBOOK:rev1": { names: { Wiggin: { text: "懷金", savedAt: Date.now() }, "Ender Wiggin": { text: "安德・維金", savedAt: Date.now() } } },
+    });
+    await showAndWait(ext, 0);
+    assert.match(promptOf(ext.claude.of("review")[0]), /名和姓分開各列一項，不要列全名/);
+    assert.deepEqual(Object.fromEntries(Object.entries(names(ext)).map(([k, v]) => [k, v.text])), { Wiggin: "懷金", Ender: "安德", Mazer: "梅澤", Rackham: "拉克姆" });
+    assert.ok(ext.hasLog(/已有別的譯法，沿用原本的：Wiggin → 懷金（這次是 維金）/));
   });
 
   test("names not seen for 30 days, and books not read for 30 days, go", async () => {

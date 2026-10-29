@@ -1244,12 +1244,12 @@ const MARKS_RULE = `原文裡的 <i>…</i>（斜體）、<b>…</b>（粗體）
 
 // Added to the prompts when the book's name list has names on the page.
 function namesRule(names) {
-  return `人名一律照這份對照表翻譯（source 是原文，text 是譯名），初稿或譯文不一致時改成對照表的譯名：${JSON.stringify(names)}`;
+  return `人名一律照這份對照表翻譯（source 是原文，text 是譯名），初稿或譯文不一致時改成對照表的譯名。對照表只有單一的名或姓，全名就把各部分的譯名用「・」接起來：${JSON.stringify(names)}`;
 }
 
 // Added to the review prompt with the reference switch on: the names on the
 // page go into the book's name list.
-const NAMES_FIELD_RULE = "names：列出這一頁原文裡出現的每一個人名，包括只出現姓或名、綽號、頭銜加姓氏。source 是原文的寫法（不含所有格的 's），text 是定稿譯文裡用的譯名。地名、組織、物品等其他名稱不要列。沒有人名就給空陣列。";
+const NAMES_FIELD_RULE = "names：列出這一頁原文裡出現的每一個人名，名和姓分開各列一項，不要列全名（例如 Ender Wiggin 列成 Ender 和 Wiggin 兩項）；只出現姓或名、綽號也要列。source 是原文的寫法（不含所有格的 's 和 Mr.、Colonel 等稱謂），text 是定稿譯文裡用的譯名。地名、組織、物品等其他名稱不要列。沒有人名就給空陣列。";
 
 // Added to the review prompt when the book's earlier paragraphs come first.
 const REFERENCE_RULE = "前面的參考段落是同一本書較早的部分，已經定稿：人名、專有名詞、稱呼和語氣跟參考段落不一致時，改成跟參考段落一致（參考段落本身有明顯錯誤時除外）。不要修改或翻譯參考段落，corrections 只能列下面輸入裡的 id。這一頁的意思以這一頁的原文為準，不要用參考段落補完這一頁被切斷的段落。";

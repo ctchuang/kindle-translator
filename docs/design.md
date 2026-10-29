@@ -231,7 +231,7 @@ sequenceDiagram
 - **挑選**（`pickReference`）：只挑位置在本頁之前的段落。參考集從 `refStart` 開始往後長，超過上限（預設 10000 tokens）時一次丟掉較舊的一半；往回翻到 `refStart` 之前時重新起算。這樣參考集的開頭很少變，prompt cache 才會命中。
 - **送出**：content 是「固定的說明、參考段落、本頁的校對 prompt」。參考段落切成約 1000 tokens 一個 block，最後一個封起來的 block 和最後一個 block 各放一個 cache breakpoint：prompt caching 在 block 邊界比對，往後讀時前面的 block 不變，每頁只寫入最後一個。
 - 執行紀錄寫出送了幾段、位置範圍、估計的 tokens，沒送時寫原因；API 回報的快取讀寫量寫在「回應結束」那一行。
-- **人名對照表**：校對多回傳這一頁的人名和譯名（`REVIEW_NAMES_SCHEMA`），存進 `names:<asin>:<revision>`。先到先贏，已有的譯名不會被改掉；每個名字最後一次出現後保留 30 天。這一頁原文出現的名字附在 Haiku、Opus 補翻和 Sonnet 校對的 prompt 裡（在 cache breakpoint 之後，不影響參考段落的快取）。
+- **人名對照表**：校對多回傳這一頁的人名和譯名（`REVIEW_NAMES_SCHEMA`），存進 `names:<asin>:<revision>`。只存單一的名或姓，全名拆開存（不然「Wiggin → 懷金」和「Ender Wiggin → 安德・維金」會並存）。先到先贏，已有的譯名不會被改掉；每個名字最後一次出現後保留 30 天。這一頁原文出現的名字附在 Haiku、Opus 補翻和 Sonnet 校對的 prompt 裡（在 cache breakpoint 之後，不影響參考段落的快取）。
 
 ## 8. 畫上譯文（`content.js`）
 

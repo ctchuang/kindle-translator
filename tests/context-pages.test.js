@@ -174,6 +174,32 @@ test.describe("mergeNames", () => {
     assert.deepEqual(out.names, {});
   });
 
+  test("a full name is kept as its given name and surname", () => {
+    const out = C.mergeNames({}, [{ source: "Mazer Rackham", text: "梅澤·拉克姆" }, { source: "Petra Arkanian", text: "佩特拉・阿坎尼安" }, { source: "Bonzo Madrid", text: "邦索 馬德里" }], 1);
+    assert.deepEqual(Object.fromEntries(Object.entries(out.names).map(([k, v]) => [k, v.text])), { Mazer: "梅澤", Rackham: "拉克姆", Petra: "佩特拉", Arkanian: "阿坎尼安", Bonzo: "邦索", Madrid: "馬德里" });
+  });
+
+  test("a full name can't override a part already listed", () => {
+    const out = C.mergeNames({ Wiggin: { text: "懷金", savedAt: 1 } }, [{ source: "Ender Wiggin", text: "安德・維金" }], 2);
+    assert.deepEqual(Object.fromEntries(Object.entries(out.names).map(([k, v]) => [k, v.text])), { Wiggin: "懷金", Ender: "安德" });
+    assert.deepEqual(out.conflicts, [{ source: "Wiggin", text: "維金", kept: "懷金" }]);
+  });
+
+  test("a full name that doesn't split evenly, or a title, is dropped", () => {
+    const out = C.mergeNames({}, [{ source: "Mr. Wiggin", text: "威金先生" }, { source: "Colonel Graff", text: "葛拉夫上校" }], 1);
+    assert.deepEqual(out.names, {});
+  });
+
+  test("a possessive 's is dropped", () => {
+    const out = C.mergeNames({}, [{ source: "Ender's", text: "安德" }, { source: "Graff’s", text: "葛拉夫" }], 1);
+    assert.deepEqual(Object.keys(out.names), ["Ender", "Graff"]);
+  });
+
+  test("full names kept before are dropped", () => {
+    const out = C.mergeNames({ "Ender Wiggin": { text: "安德・維金", savedAt: 1 }, Wiggin: { text: "懷金", savedAt: 1 } }, [], 2);
+    assert.deepEqual(Object.keys(out.names), ["Wiggin"]);
+  });
+
   test("past the per-book limit the names seen longest ago go", () => {
     const stored = Object.fromEntries(Array.from({ length: C.NAMES_MAX }, (_, i) => [`N${i}`, { text: `名${i}`, savedAt: i }]));
     const out = C.mergeNames(stored, [{ source: "New", text: "新" }], C.NAMES_MAX);
