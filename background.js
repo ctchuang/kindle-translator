@@ -48,7 +48,7 @@ const DEFAULTS = {
   autoTranslate: true,
   prefetch: true,
   referencePages: false,
-  referenceTokens: 10000,
+  referenceTokens: 16000,
   targetLang: "繁體中文（台灣用語）",
   overlay: true,
 };

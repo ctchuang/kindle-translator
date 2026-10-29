@@ -1,7 +1,7 @@
 const FIELDS = { apiKey: "", effort: "low", targetLang: "繁體中文（台灣用語）" };
 // Numbers, saved with the rest; an empty or out-of-range one saves the
 // nearest allowed value (the default when empty).
-const NUMBERS = { referenceTokens: { def: 10000, min: 2000, max: 100000 } };
+const NUMBERS = { referenceTokens: { def: 16000, min: 2000, max: 100000 } };
 // The page's one "translation mode" select maps onto two stored settings the
 // background reads: engine ("ocr" | "vision") and the OCR quality level.
 const MODE_SETTINGS = { engine: "ocr", quality: "review" };

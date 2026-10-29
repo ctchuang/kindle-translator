@@ -77,7 +77,7 @@ test("saving an OCR mode writes trimmed fields, engine and quality, and drops le
     quality: "haiku",
     prefetch: true,
     referencePages: false,
-    referenceTokens: 10000,
+    referenceTokens: 16000,
     overlay: false, // other settings are left alone
   });
 });
@@ -94,16 +94,16 @@ test("the reference switch and limit show and save, the limit kept in range", as
   assert.equal(s.$("referenceTokens").value, "2000", "the field shows what was saved");
   s.$("referenceTokens").value = "";
   await save(s);
-  assert.equal(s.stored().referenceTokens, 10000);
+  assert.equal(s.stored().referenceTokens, 16000);
   s.$("referenceTokens").value = "abc";
   await save(s);
-  assert.equal(s.stored().referenceTokens, 10000);
+  assert.equal(s.stored().referenceTokens, 16000);
 });
 
 test("the reference is off by default", async (t) => {
   const s = await setup(t);
   assert.equal(s.$("referencePages").checked, false);
-  assert.equal(s.$("referenceTokens").value, "10000");
+  assert.equal(s.$("referenceTokens").value, "16000");
 });
 
 test("deleting the kept reference removes every book's paragraphs and names, and nothing else", async (t) => {
