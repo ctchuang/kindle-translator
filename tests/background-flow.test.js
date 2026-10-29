@@ -1700,6 +1700,26 @@ test.describe("the book's name list", () => {
     if (opus.items.some((p) => /Ender/.test(p.text))) assert.match(promptOf(opus), /"source":"Ender","text":"安德"/);
   });
 
+  test("with the switch on, an Opus fallback translation is reviewed too, and its names put back", async () => {
+    const ext = startExtension({
+      book: namedBook(),
+      settings: REF,
+      claude: (req) => {
+        if (req.kind === "translate" && req.body.model === "claude-haiku-5-5" && req.n === 0) return { json: { translations: [], notes: "版權", summarized: false } };
+        if (req.kind === "translate" && req.body.model === "claude-opus-5-5") return { json: { translations: req.items.map((p) => ({ id: p.id, text: `譯：${p.text.replace(/Graff/g, "葛拉夫")}` })), notes: "", summarized: false } };
+        if (req.kind === "review") return { json: { corrections: [], notes: "", names: [{ source: "Graff", text: "葛拉夫" }] } };
+      },
+    });
+    await ext.chrome.storage.local.set({ "names:B0TESTBOOK:rev1": { names: { Graff: { text: "格拉夫", savedAt: Date.now() } } } });
+    await showAndWait(ext, 0);
+    assert.equal(ext.claude.calls.filter((c) => c.body.model === "claude-opus-5-5").length, 1);
+    const [review] = ext.claude.of("review");
+    assert.equal(review.items.length, ext.texts(0).length, "both columns reviewed, Opus's included");
+    const drawn = ext.overlaysSent()[0].blocks.map((b) => b.text).join("\n");
+    assert.match(drawn, /格拉夫/);
+    assert.doesNotMatch(drawn, /葛拉夫/);
+  });
+
   test("Haiku mode uses the names kept, without a review to add any", async () => {
     const ext = startExtension({ book: namedBook(), settings: { ...REF, quality: "haiku" } });
     await ext.chrome.storage.local.set({ "names:B0TESTBOOK:rev1": { names: { Ender: { text: "安德", savedAt: Date.now() } } } });

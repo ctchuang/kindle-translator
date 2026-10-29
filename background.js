@@ -1400,9 +1400,11 @@ function qualityOf(settings) {
 }
 
 // Review the drafts of a screen's chunks in one request. An Opus fallback's
-// translation isn't reviewed (it was given the name list, though).
+// translation is reviewed only with the reference switch on: it doesn't
+// need the polish, but left out it kept names off the book's list (two
+// 安德 among 333 恩德 in the Ender's Game test).
 async function reviewDrafts(settings, model, chunks, drafts, signal, page, names) {
-  const mine = drafts.map((d) => !d.byOpus);
+  const mine = drafts.map((d) => !d.byOpus || !!settings.referencePages);
   if (!mine.includes(true)) return drafts;
   const chunk = chunks.filter((c, i) => mine[i]).flat();
   const merged = { translations: drafts.filter((d, i) => mine[i]).flatMap((d) => d.translations || []) };
