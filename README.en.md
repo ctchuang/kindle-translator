@@ -62,6 +62,7 @@ Translations are kept per paragraph, by the paragraph's position in the book, wh
 
 ## Release notes
 
+- **2.3.2**: screens with underlined book titles (the reader's plain underlines, not a link's) no longer fail with “閱讀器的頁面資料裡找不到目前這一頁” (the screen isn't found in the reader's page data); a screen that's slightly off but clearly the one shown is still found, and the log says so. When none is found, the log adds a line (“辨識不到：…”) saying why.
 - **2.3.1**: when Claude answers a page with a summary, the names its review lists no longer go into the name list (a summary isn't kept, like the paragraph cache); when a retry brings a translation, only that try's names are kept.
 - **2.3.0**: a list of names per book.
   - With "refer to earlier pages when reviewing" on, each book gets a list of names (original → translation), compiled by Sonnet's review; every later translation (including a column Opus took over) and review follows it, however many pages back a name was first seen; a column Opus took over is then reviewed by Sonnet too. A name already listed keeps its translation; each is kept for 30 days after it was last seen and can be deleted from the options page.
