@@ -361,6 +361,13 @@ async function saveNames(page, found, tag) {
   return res;
 }
 
+// What saveNames would do with `found`, without keeping anything.
+async function compareNames(page, found) {
+  const key = namesKey(page);
+  const { [key]: book } = await chrome.storage.local.get(key);
+  return mergeNames(book?.names, found, Date.now());
+}
+
 // The review used another translation for a listed name (`conflicts` from
 // mergeNames): put the listed one back in the paragraphs (`items`, { id,
 // source }) where the name appears, in `texts` (id → text). A one-character
@@ -950,6 +957,7 @@ async function requestTranslations(settings, paras, jobSignal, page) {
       notes: outs.map((o) => (o.notes || "").trim()).filter(Boolean).join(" "),
       summarized: outs.some((o) => o.summarized === true),
       model: outs.find((o) => o.model !== plan.translate)?.model ?? outs[0].model, // shows when Opus stepped in
+      names: outs.find((o) => o.names)?.names,
     };
     if (!isSummary(out)) break;
     if (attempt >= SUMMARY_RETRIES) {
@@ -958,6 +966,8 @@ async function requestTranslations(settings, paras, jobSignal, page) {
     }
     log(`Claude 這次只給摘要，不是翻譯（${out.notes || "沒有說明"}），自動重新請求`);
   }
+  // A summary isn't kept, its names included.
+  if (out.names && !isSummary(out)) await saveNames(page, out.names, "").catch((err) => log(`人名對照表沒有存下來：${err.message || err}`));
   const texts = out.texts.map((text, i) => {
     const checked = checkMarks(text, items[i].text);
     if (!checked.ok) log(`第 ${i + 1} 段譯文的樣式標記不完整，改用不帶樣式的譯文`);
@@ -1408,15 +1418,17 @@ async function reviewDrafts(settings, model, chunks, drafts, signal, page, names
   if (!mine.includes(true)) return drafts;
   const chunk = chunks.filter((c, i) => mine[i]).flat();
   const merged = { translations: drafts.filter((d, i) => mine[i]).flatMap((d) => d.translations || []) };
-  const reviewed = new Map((await reviewChunk(settings, model, chunk, merged, "", signal, page, names)).translations.map((t) => [t.id, t.text]));
-  return drafts.map((d, i) => (mine[i] ? { ...d, translations: (d.translations || []).map((t) => ({ ...t, text: reviewed.get(t.id) ?? t.text })) } : d));
+  const review = await reviewChunk(settings, model, chunk, merged, "", signal, page, names);
+  const reviewed = new Map(review.translations.map((t) => [t.id, t.text]));
+  // The names the review listed ride along on the drafts it covered.
+  return drafts.map((d, i) => (mine[i] ? { ...d, names: review.names, translations: (d.translations || []).map((t) => ({ ...t, text: reviewed.get(t.id) ?? t.text })) } : d));
 }
 
 // Apply `model`'s corrections to a draft. A failed or declined review keeps
 // the draft: it's already a usable translation. With the reference switch
 // on, the book's earlier paragraphs go first (see referenceContent), the
 // book's names on the page go with the prompt, and the names the review
-// lists go into the book's name list.
+// lists come back as `names` (requestTranslations keeps them).
 async function reviewChunk(settings, model, chunk, draft, tag, signal, page, names = []) {
   const texts = new Map((draft.translations || []).map((t) => [t.id, t.text]));
   const items = chunk
@@ -1456,12 +1468,16 @@ async function reviewChunk(settings, model, chunk, draft, tag, signal, page, nam
     log(`${tag}校對第 ${c.id + 1} 段\n  初稿：${texts.get(c.id)}\n  改為：${c.text}`);
     texts.set(c.id, c.text);
   }
+  // The names are only compared here; requestTranslations keeps them once
+  // it knows the screen isn't a summary.
+  let found = null;
   if (listNames && Array.isArray(out.names)) {
-    const res = await saveNames(page, out.names, tag).catch((err) => log(`${tag}人名對照表沒有存下來：${err.message || err}`));
+    found = out.names;
+    const res = await compareNames(page, found).catch(() => null);
     const n = res ? restoreNames(res.conflicts, items, texts) : 0;
     if (n) log(`${tag}譯文裡的人名改回對照表的譯名（${n} 處）`);
   }
-  return { ...draft, translations: [...texts].map(([id, text]) => ({ id, text })) };
+  return { ...draft, translations: [...texts].map(([id, text]) => ({ id, text })), names: found };
 }
 
 // Fewer than half of the paragraphs translated, or flagged as a summary.

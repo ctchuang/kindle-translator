@@ -1740,3 +1740,114 @@ test.describe("the book's name list", () => {
     assert.equal(ext.msgs("error").length, 0);
   });
 });
+
+test.describe("reference pages and the name list: the less common paths", () => {
+  const REF = { referencePages: true };
+  const namedBook = (opts) => testBook({ paragraphs: Array.from({ length: 60 }, (_, i) => (i % 3 === 0 ? `Ender looked at Graff and ${words(i, 6)}.` : `${words(i, 10)}.`)), ...opts });
+  const listing = (list) => (req) => req.kind === "review" && { json: { corrections: [], notes: "", names: list } };
+  const content = (req) => req.body.messages[0].content;
+  const promptOf = (req) => content(req).at(-1).text;
+  const refParas = (req) =>
+    content(req)
+      .slice(1, -1)
+      .flatMap((b) => b.text.split("\n").map((l) => JSON.parse(l)));
+  const local = (ext, key) => plain(ext.chrome.storage.local.data.get(key));
+
+  test("cache breakpoints: the last full block and the last block, and full blocks stay put", async () => {
+    // Long paragraphs, so the reference soon fills a block or two.
+    const ext = startExtension({ book: testBook({ paragraphs: Array.from({ length: 40 }, (_, i) => `${words(i, 70)}.`) }), settings: REF });
+    for (let i = 0; i < 8; i++) await showAndWait(ext, i);
+    const reviews = ext.claude.of("review").filter((r) => content(r).length > 1);
+    let sawTwo = false;
+    for (const r of reviews) {
+      const blocks = content(r).slice(1, -1); // between the intro and the page's prompt
+      const expected = C.referenceBlocks(refParas(r));
+      assert.deepEqual(blocks.map((b) => b.text), expected.map((b) => b.text), "blocks cut as referenceBlocks cuts them");
+      const lastFull = expected.findLastIndex((b) => b.full);
+      const marked = blocks.flatMap((b, i) => (b.cache_control ? [i] : []));
+      assert.deepEqual(marked, [...new Set([lastFull, blocks.length - 1].filter((i) => i >= 0))].sort((a, b) => a - b));
+      assert.ok(content(r).filter((b) => b.cache_control).length <= 4, "the API allows four breakpoints");
+      assert.equal(content(r)[0].cache_control, undefined);
+      assert.equal(content(r).at(-1).cache_control, undefined, "the page's own prompt comes after the breakpoints");
+      if (marked.length === 2) sawTwo = true;
+    }
+    assert.ok(sawTwo, "the test reached a reference with a full block before the last");
+    // Reading on, a block once full is sent unchanged.
+    for (let k = 1; k < reviews.length; k++) {
+      const before = C.referenceBlocks(refParas(reviews[k - 1])).filter((b) => b.full);
+      const after = content(reviews[k]).slice(1, -1).map((b) => b.text);
+      assert.deepEqual(after.slice(0, before.length), before.map((b) => b.text));
+    }
+  });
+
+  test("the screen translated ahead gets the screen on show as reference, and its names", async () => {
+    const ext = startExtension({ book: namedBook(), settings: { ...REF, prefetch: true }, claude: listing([{ source: "Ender", text: "安德" }, { source: "Graff", text: "格拉夫" }]) });
+    await showAndWait(ext, 0);
+    assert.ok(ext.hasLog(/預讀下一頁：開始/));
+    const [, ahead] = ext.claude.of("review");
+    assert.ok(ahead, "the next screen was reviewed");
+    assert.deepEqual(refParas(ahead).map((p) => p.source), ext.texts(0));
+    assert.match(promptOf(ahead), /"source":"Ender","text":"安德"/);
+    const drafts = ext.claude.of("translate").slice(-2);
+    assert.ok(drafts.some((r) => /"source":"Ender","text":"安德"/.test(promptOf(r))), "its drafts had the names too");
+    assert.equal(ext.overlaysSent().length, 1, "only the screen on show was drawn");
+  });
+
+  test("a book the page can't name: no reference, no names asked for, nothing kept", async () => {
+    const ext = startExtension({ book: namedBook({ asin: "" }), settings: REF, claude: listing([{ source: "Ender", text: "安德" }]) });
+    await showAndWait(ext, 0);
+    await showAndWait(ext, 1);
+    for (const r of ext.claude.of("review")) {
+      assert.equal(content(r).length, 1);
+      assert.equal(r.body.output_config.format.schema.properties.names, undefined);
+    }
+    assert.ok(ext.hasLog(/校對沒有參考前面的頁：不知道是哪一本書/));
+    assert.equal(ext.chrome.storage.local.data.size, 0);
+    assert.equal(ext.overlaysSent().length, 2, "translated as usual");
+  });
+
+  test("a summary keeps neither its paragraphs nor its names", async () => {
+    const ext = startExtension({
+      book: namedBook(),
+      settings: REF,
+      claude: (req) =>
+        req.kind === "translate"
+          ? { json: { translations: req.items.map((p) => ({ id: p.id, text: `譯：${p.text}` })), notes: "", summarized: true } }
+          : listing([{ source: "Ender", text: "恩德" }])(req),
+    });
+    await showAndWait(ext, 0);
+    assert.ok(ext.hasLog(/重試後仍然只給摘要/));
+    assert.equal(ext.claude.of("review").length, 2, "reviewed on both tries");
+    assert.equal(local(ext, "names:B0TESTBOOK:rev1"), undefined);
+    assert.deepEqual(local(ext, "ref:B0TESTBOOK:rev1")?.paras ?? [], [], "picking the reference may note where it starts, but no paragraph is kept");
+    assert.equal(ext.msgs("result").at(-1).summary, true, "the summary is still shown");
+  });
+
+  test("a summary retried into a translation keeps only the translation's names", async () => {
+    // The first try's drafts come before any review; the retry's after one.
+    let reviews = 0;
+    const ext = startExtension({
+      book: namedBook(),
+      settings: REF,
+      claude: (req) => {
+        if (req.kind === "translate") {
+          return { json: { translations: req.items.map((p) => ({ id: p.id, text: `譯：${p.text}` })), notes: "", summarized: reviews === 0 } };
+        }
+        reviews++;
+        return { json: { corrections: [], notes: "", names: reviews === 1 ? [{ source: "Ender", text: "恩德" }] : [{ source: "Ender", text: "安德" }] } };
+      },
+    });
+    await showAndWait(ext, 0);
+    assert.ok(ext.hasLog(/只給摘要，不是翻譯.*自動重新請求/));
+    assert.deepEqual(Object.fromEntries(Object.entries(local(ext, "names:B0TESTBOOK:rev1").names).map(([k, v]) => [k, v.text])), { Ender: "安德" });
+    assert.ok(local(ext, "ref:B0TESTBOOK:rev1").paras.length > 0, "the translation is kept as reference");
+  });
+
+  test("with the overlay off, what the side panel shows is kept as reference too", async () => {
+    const ext = startExtension({ book: namedBook(), settings: { ...REF, overlay: false } });
+    await showAndWait(ext, 0);
+    assert.equal(ext.overlaysSent().length, 0);
+    assert.ok(ext.hasLog(/覆蓋層開關已關閉，譯文只顯示在側邊欄/));
+    assert.deepEqual(local(ext, "ref:B0TESTBOOK:rev1").paras.map((p) => p.source), ext.texts(0));
+  });
+});
