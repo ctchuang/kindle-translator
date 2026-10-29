@@ -121,6 +121,7 @@ function identify() {
         report({ error: failed });
         return;
       }
+      if (found.fallback) pageLog(found.fallback);
       shown = screenInfo(found.layout, found.page);
       shown.highlights = readHighlights(shown);
       failed = null;
@@ -152,6 +153,7 @@ async function findScreen(img) {
   ctx.drawImage(bitmap, 0, 0);
   const shot = { width: bitmap.width, height: bitmap.height, data: ctx.getImageData(0, 0, bitmap.width, bitmap.height).data };
   let tried = 0;
+  const sorted = [];
   for (const layout of [...layouts.values()].reverse()) {
     const scale = scaleOf(layout);
     // Readers mostly turn forward: after the screen itself, the ones after
@@ -163,33 +165,44 @@ async function findScreen(img) {
     if (hit) return { layout, page: hit.page, tried: tried + hit.tried, ms: Math.round(performance.now() - started) };
     // Only those of the image's size were drawn and compared.
     tried += candidates.filter((p) => Math.round(p.width * scale) === shot.width && Math.round(p.height * scale) === shot.height).length;
+    sorted.push({ layout, candidates });
   }
-  return { miss: missReport(shot) };
+  // None within the threshold: the closest, if it stands out (see
+  // fallbackScreen), or why none would do.
+  const closest = sorted
+    .flatMap(({ layout, candidates }) => {
+      const scale = scaleOf(layout);
+      return closestScreens(shot, candidates, (p) => pixelsOf(layout, p, scale), scale).map((c) => ({ ...c, layout }));
+    })
+    .sort((a, b) => a.diff - b.diff);
+  const best = fallbackScreen(closest);
+  const ms = Math.round(performance.now() - started);
+  if (best) return { layout: best.layout, page: best.page, tried, ms, fallback: `沒有完全相符的畫面，採用最接近的：${describeClosest(closest)}` };
+  return { miss: missReport(shot, closest) };
 }
 
-const MISS_DIFF_LIMIT = 0.05;
+// The closest three, for the log: "位置 571141 差 0.13%、位置 517703 差 >5%".
+function describeClosest(closest) {
+  const pct = (d) => (d > CLOSEST_LIMIT ? `>${CLOSEST_LIMIT * 100}` : (d * 100).toFixed(2));
+  return closest
+    .slice(0, 3)
+    .map((c) => `位置 ${c.page.startPositionId} 差 ${pct(c.diff)}%`)
+    .join("、");
+}
 
 // Why no screen matched, for the log: the image's size against each layout's
-// screens, and how far off the closest three of the right size were.
-function missReport(shot) {
+// screens, and how far off the closest ones of the right size were.
+function missReport(shot, closest) {
   const parts = [...layouts.values()].reverse().map((layout, i) => {
     const scale = scaleOf(layout);
     const pages = [...layout.pages.values()];
     const starts = pages.map((p) => p.startPositionId);
     const sizes = [...new Set(pages.map((p) => `${Math.round(p.width * scale)}×${Math.round(p.height * scale)}`))];
     const fits = pages.filter((p) => Math.round(p.width * scale) === shot.width && Math.round(p.height * scale) === shot.height);
-    let text = `版面 ${i + 1}（rasterScale ${scale}，${pages.length} 個畫面，位置 ${Math.min(...starts)}–${Math.max(...starts)}，畫出來 ${sizes.join("、")}）尺寸相符 ${fits.length} 個`;
-    if (fits.length) {
-      // Past 5% it's plainly another screen: stop counting there.
-      const closest = fits
-        .map((p) => ({ start: p.startPositionId, diff: pixelDiff(pixelsOf(layout, p, scale), shot.data, shot.width, compareMasks(p, scale), MISS_DIFF_LIMIT) }))
-        .sort((a, b) => a.diff - b.diff)
-        .slice(0, 3);
-      text += `，最接近的：${closest.map((c) => `位置 ${c.start} 差 ${c.diff > MISS_DIFF_LIMIT ? `>${MISS_DIFF_LIMIT * 100}` : (c.diff * 100).toFixed(2)}%`).join("、")}`;
-    }
-    return text;
+    return `版面 ${i + 1}（rasterScale ${scale}，${pages.length} 個畫面，位置 ${Math.min(...starts)}–${Math.max(...starts)}，畫出來 ${sizes.join("、")}）尺寸相符 ${fits.length} 個`;
   });
-  return `辨識不到：書頁圖片 ${shot.width}×${shot.height}（devicePixelRatio ${globalThis.devicePixelRatio ?? "?"}），上一頁位置 ${lastStart ?? "無"}；${parts.join("；")}`;
+  const near = closest.length ? `；最接近的：${describeClosest(closest)}` : "";
+  return `辨識不到：書頁圖片 ${shot.width}×${shot.height}（devicePixelRatio ${globalThis.devicePixelRatio ?? "?"}），上一頁位置 ${lastStart ?? "無"}；${parts.join("；")}${near}`;
 }
 
 function scaleOf(layout) {

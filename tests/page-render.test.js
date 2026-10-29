@@ -732,6 +732,34 @@ test.describe("identifyScreen", () => {
     assert.equal(R.identifyScreen(shot, b.pages, draw, 2)?.page, b.pages[3]);
   });
 
+  // Red dots over a share of the image: a decoration the reader drew that
+  // isn't left out of the comparison.
+  const speckle = (shot, share) => {
+    const n = Math.round(shot.width * shot.height * share);
+    for (let i = 0; i < n; i++) shot.data.set([255, 0, 0], i * 2 * 4);
+    return shot;
+  };
+
+  test("closestScreens: the candidates of the image's size, closest first, the first `count` only", () => {
+    const shot = speckle(raster.readerPixels(b.pages[3], b.fonts, 2), 0.003);
+    assert.equal(R.identifyScreen(shot, b.pages, draw, 2), null);
+    const closest = R.closestScreens(shot, b.pages, draw, 2);
+    assert.equal(closest[0].page, b.pages[3]);
+    assert.ok(closest[0].diff > R.SAME_SCREEN_MAX_DIFF && closest[0].diff < 0.01);
+    assert.ok(closest[1].diff > R.CLOSEST_LIMIT, "another screen is far off");
+    assert.deepEqual(R.closestScreens(shot, b.pages, draw, 2, 2).map((c) => c.page).sort((x, y) => x.startPositionId - y.startPositionId), b.pages.slice(0, 2));
+    assert.deepEqual(R.closestScreens(shot, batch(book.layout({ width: 320 })).pages, draw, 2), []);
+  });
+
+  test("fallbackScreen: the closest when it's within 1% and five times closer than the next", () => {
+    const [p, q] = b.pages;
+    assert.equal(R.fallbackScreen([{ page: p, diff: 0.0013 }, { page: q, diff: 0.06 }]).page, p);
+    assert.equal(R.fallbackScreen([{ page: p, diff: 0.0013 }]).page, p, "alone of its size");
+    assert.equal(R.fallbackScreen([{ page: p, diff: 0.002 }, { page: q, diff: 0.008 }]), null, "two near-empty screens alike");
+    assert.equal(R.fallbackScreen([{ page: p, diff: 0.02 }, { page: q, diff: 0.3 }]), null, "too far off");
+    assert.equal(R.fallbackScreen([]), null);
+  });
+
   test("two screens that look alike resolve to the first listed", () => {
     const p = b.pages[0];
     const twin = { ...p, startPositionId: p.startPositionId + 999999 };

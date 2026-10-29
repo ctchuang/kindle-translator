@@ -359,6 +359,30 @@ function identifyScreen(shot, candidates, draw, scale) {
 // Above this share of the screen hidden by illustrations, a match is weak.
 const MOSTLY_MASKED = 0.5;
 
+// When no screen matches: the closest of the first `count` candidates of the
+// image's size (best guesses first), as [{ page, diff }] closest first. A
+// diff past CLOSEST_LIMIT is only known to be past it.
+const CLOSEST_LIMIT = 0.05;
+function closestScreens(shot, candidates, draw, scale, count = 8) {
+  return candidates
+    .filter((page) => Math.round(page.width * scale) === shot.width && Math.round(page.height * scale) === shot.height)
+    .slice(0, count)
+    .map((page) => ({ page, diff: pixelDiff(draw(page), shot.data, shot.width, compareMasks(page, scale), CLOSEST_LIMIT) }))
+    .sort((a, b) => a.diff - b.diff);
+}
+
+// The closest screen is still taken when it's near enough and well ahead of
+// the next closest: a decoration not left out yet costs a fraction of a
+// percent, while two near-empty screens are close to each other as well.
+const FALLBACK_MAX_DIFF = 0.01;
+const FALLBACK_MARGIN = 5;
+function fallbackScreen(closest) {
+  const [best, next] = closest;
+  if (!best || best.diff > FALLBACK_MAX_DIFF) return null;
+  if (next && next.diff < best.diff * FALLBACK_MARGIN) return null;
+  return best;
+}
+
 // Share of a width × height image the masks cover (overlaps counted once
 // per row).
 function maskedShare(masks, width, height) {
@@ -408,6 +432,9 @@ if (typeof module !== "undefined") {
     pixelDiff,
     maskedShare,
     identifyScreen,
+    closestScreens,
+    fallbackScreen,
+    CLOSEST_LIMIT,
     screenAfter,
   };
 }

@@ -65,11 +65,11 @@ async function deliver(s, layout, from = 0, count = 6, { url, buf } = {}) {
 
 // The reader shows screen `index` of `layout`: a new blob URL and its pixels.
 let blobs = 0;
-async function show(s, layout, index, { complete = true, wait = true } = {}) {
+async function show(s, layout, index, { complete = true, wait = true, tweak = (px) => px } = {}) {
   const img = s.img();
   const screen = layout.screens[index];
   img.src = `blob:https://read.amazon.com/${++blobs}`;
-  img.__pixels = raster.readerPixels(screen, layout.fonts, Number(layout.params.rasterScale));
+  img.__pixels = tweak(raster.readerPixels(screen, layout.fonts, Number(layout.params.rasterScale)));
   img.complete = complete;
   img.naturalWidth = complete ? img.__pixels.width : 0;
   img.naturalHeight = complete ? img.__pixels.height : 0;
@@ -390,6 +390,19 @@ test("a screen missing from the data is reported, and found once its batch comes
   await deliver(s, L, 6, 6);
   await waitFor(() => s.sent("pageShown").length === 2, { what: "found" });
   assert.equal(s.sent("pageShown")[1].page.start, L.screens[8].startPositionId);
+});
+
+test("a screen a little off (something drawn that isn't left out) is taken when it stands out, and logged", async (t) => {
+  const s = setup(t);
+  await deliver(s, L, 0, 6);
+  // Red dots over 0.3% of the image.
+  const speckle = (px) => {
+    for (let i = 0; i < Math.round(px.width * px.height * 0.003); i++) px.data.set([255, 0, 0], i * 2 * 4);
+    return px;
+  };
+  const msg = await show(s, L, 2, { tweak: speckle });
+  assert.equal(msg.page.start, L.screens[2].startPositionId);
+  assert.match(s.sent("pageLog").at(-1).text, new RegExp(`^沒有完全相符的畫面，採用最接近的：位置 ${L.screens[2].startPositionId} 差 0\\.\\d\\d%、位置 \\d+ 差 >5%`));
 });
 
 test("a new batch doesn't re-identify a screen already known", async (t) => {
