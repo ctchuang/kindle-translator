@@ -624,6 +624,30 @@ test.describe("pixelDiff / imageMasks", () => {
     assert.equal(R.pixelDiff(white, c, 10), 1);
   });
 
+  test("a tolerance passed in loosens the per-pixel threshold", () => {
+    const b = rgba(10, 10, () => [200, 200, 200]);
+    assert.equal(R.pixelDiff(white, b, 10), 1);
+    assert.equal(R.pixelDiff(white, b, 10, [], 1, 200), 0);
+  });
+
+  test("pixelTolerance: half the weakest contrast between the page and its text", () => {
+    assert.equal(R.pixelTolerance(screen([run()])), 382);
+    assert.equal(R.pixelTolerance(screen([run({ color: "#acacacff" })], { fill: "#000000ff", ink: "#acacacff" })), 258);
+    // A grey link on white: the weaker contrast decides.
+    assert.equal(R.pixelTolerance(screen([run(), run({ color: "#808080ff" })])), 190);
+    // Text the colour of the page leaves only the floor.
+    assert.equal(R.pixelTolerance(screen([run({ color: "#ffffffff" })])), R.PIXEL_TOLERANCE);
+  });
+
+  test("anti-aliasing smoothed in five shades instead of 256 still matches", () => {
+    // Coverage 0..1 across a glyph edge, black on white, then rounded to
+    // quarters as a GPU canvas does.
+    const fine = rgba(10, 10, (x) => Array(3).fill(Math.round(255 * (1 - x / 9))));
+    const coarse = rgba(10, 10, (x) => Array(3).fill(Math.round(255 * (1 - Math.round((x / 9) * 4) / 4))));
+    assert.ok(R.pixelDiff(fine, coarse, 10) > 0.5);
+    assert.equal(R.pixelDiff(fine, coarse, 10, [], 1, R.pixelTolerance(screen([run()]))), 0);
+  });
+
   test("masked rectangles are left out of the count and the total", () => {
     const b = rgba(10, 10, (x, y) => (x < 5 && y < 5 ? [0, 0, 0] : [255, 255, 255]));
     assert.equal(R.pixelDiff(white, b, 10, [[0, 0, 5, 5]]), 0);

@@ -31,10 +31,10 @@ const LAYOUT_PARAMS = [
   "rasterScale",
 ];
 
-// A pixel differs when its R+G+B differ by more than this (anti-aliasing
-// noise stays well under it); a screen matches when at most this share of
-// the compared pixels differ. The right screen measured 0%, the nearest
-// wrong one 7.8% or more.
+// A pixel differs when its R+G+B differ by more than half the contrast
+// between the page and its text (see pixelTolerance), and never by this
+// little; a screen matches when at most this share of the compared pixels
+// differ. The right screen measured 0%, the nearest wrong one 7.8% or more.
 const PIXEL_TOLERANCE = 30;
 const SAME_SCREEN_MAX_DIFF = 0.001;
 
@@ -224,8 +224,7 @@ function pageParagraphs(page) {
 // whatever the theme, and no boxes, which OCR reads best.
 function renderPage(page, fonts, scale, paths = new Map(), { plain = false } = {}) {
   const canvas = new OffscreenCanvas(Math.round(page.width * scale), Math.round(page.height * scale));
-  // Drawn in software, like the reader's image: a GPU canvas smooths glyph
-  // edges in only five shades (at 110% zoom 4.5% of the pixels then differ).
+  // Its pixels are read back right away, which is quicker off the GPU.
   const ctx = canvas.getContext("2d", { willReadFrequently: true });
   ctx.fillStyle = plain ? "#ffffff" : cssColor(page.fillColor, "#ffffff");
   ctx.fillRect(0, 0, canvas.width, canvas.height);
@@ -308,10 +307,24 @@ function compareMasks(page, scale) {
   return masks;
 }
 
-// Share of the pixels outside `masks` whose colour differs between two RGBA
-// arrays of the same `width`. Stops counting once the share is past
-// `limit`, returning a value above it.
-function pixelDiff(a, b, width, masks = [], limit = 1) {
+// How far apart (R+G+B) a pixel of `page` may be and still count as the
+// same: half the smallest contrast between its background and a text
+// colour. Anti-aliased glyph edges differ by much less, however the canvas
+// smooths them (in software 256 shades, on the GPU five), while a glyph out
+// of place differs by the whole contrast.
+function pixelTolerance(page) {
+  const rgb = (c) => [1, 3, 5].map((i) => parseInt(c.slice(i, i + 2), 16));
+  const fill = rgb(cssColor(page.fillColor, "#ffffff"));
+  const ink = cssColor(page.inkColor);
+  const inks = new Set([ink, ...runsOf(page).map((run) => cssColor(run.textColor, ink))]);
+  const contrast = Math.min(...[...inks].map((c) => rgb(c).reduce((sum, v, i) => sum + Math.abs(v - fill[i]), 0)));
+  return Math.max(PIXEL_TOLERANCE, Math.floor(contrast / 2));
+}
+
+// Share of the pixels outside `masks` whose colour differs, by more than
+// `tolerance` (R+G+B), between two RGBA arrays of the same `width`. Stops
+// counting once the share is past `limit`, returning a value above it.
+function pixelDiff(a, b, width, masks = [], limit = 1, tolerance = PIXEL_TOLERANCE) {
   const height = a.length / 4 / width;
   let compared = 0;
   let differ = 0;
@@ -327,7 +340,7 @@ function pixelDiff(a, b, width, masks = [], limit = 1) {
       }
       const i = (y * width + x) * 4;
       compared++;
-      if (Math.abs(a[i] - b[i]) + Math.abs(a[i + 1] - b[i + 1]) + Math.abs(a[i + 2] - b[i + 2]) > PIXEL_TOLERANCE) {
+      if (Math.abs(a[i] - b[i]) + Math.abs(a[i + 1] - b[i + 1]) + Math.abs(a[i + 2] - b[i + 2]) > tolerance) {
         if (++differ > maxDiffer) return Math.max(limit * 2, differ / (width * height));
       }
     }
@@ -350,7 +363,7 @@ function identifyScreen(shot, candidates, draw, scale) {
   for (const page of candidates) {
     if (Math.round(page.width * scale) !== shot.width || Math.round(page.height * scale) !== shot.height) continue;
     tried++;
-    const diff = pixelDiff(draw(page), shot.data, shot.width, compareMasks(page, scale), SAME_SCREEN_MAX_DIFF);
+    const diff = pixelDiff(draw(page), shot.data, shot.width, compareMasks(page, scale), SAME_SCREEN_MAX_DIFF, pixelTolerance(page));
     if (diff > SAME_SCREEN_MAX_DIFF) continue;
     if (maskedShare(imageMasks(page, scale), shot.width, shot.height) <= MOSTLY_MASKED) return { page, diff, tried };
     weak ??= { page, diff };
@@ -369,7 +382,7 @@ function closestScreens(shot, candidates, draw, scale, count = 8) {
   return candidates
     .filter((page) => Math.round(page.width * scale) === shot.width && Math.round(page.height * scale) === shot.height)
     .slice(0, count)
-    .map((page) => ({ page, diff: pixelDiff(draw(page), shot.data, shot.width, compareMasks(page, scale), CLOSEST_LIMIT) }))
+    .map((page) => ({ page, diff: pixelDiff(draw(page), shot.data, shot.width, compareMasks(page, scale), CLOSEST_LIMIT, pixelTolerance(page)) }))
     .sort((a, b) => a.diff - b.diff);
 }
 
@@ -431,6 +444,7 @@ if (typeof module !== "undefined") {
     imageMasks,
     decorations,
     compareMasks,
+    pixelTolerance,
     pixelDiff,
     maskedShare,
     identifyScreen,
