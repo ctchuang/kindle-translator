@@ -62,6 +62,7 @@ Translations are kept per paragraph, by the paragraph's position in the book, wh
 
 ## Release notes
 
+- **2.4.0**: with the browser zoomed (110%, say), screens no longer all fail with “閱讀器的頁面資料裡找不到目前這一頁” (the screen isn't found in the reader's page data). The screens compared are now drawn in software, as the reader draws its own, so the glyph edges match.
 - **2.3.2**: screens with underlined book titles (the reader's plain underlines, not a link's) no longer fail with “閱讀器的頁面資料裡找不到目前這一頁” (the screen isn't found in the reader's page data); a screen that's slightly off but clearly the one shown is still found, and the log says so. When none is found, the log adds a line (“辨識不到：…”) saying why.
 - **2.3.1**: when Claude answers a page with a summary, the names its review lists no longer go into the name list (a summary isn't kept, like the paragraph cache); when a retry brings a translation, only that try's names are kept.
 - **2.3.0**: a list of names per book.
