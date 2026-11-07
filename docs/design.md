@@ -49,7 +49,7 @@
 
 ### 2.4 畫出頁面（`renderPage`）
 
-在 canvas 上先畫灰底方塊（`fillStroke`），再依序畫每個文字串的每個字形：`Path2D(字形輪廓)`，`setTransform` 用文字串的 `transform` 加上該字形的 `xPosition`，再依 `fontSize / unitsPerEm` 縮放，乘上 `rasterScale`。背景用 `page.fillColor`，字用 `run.textColor`。插圖和底線（連結的 `linkLine`、一般的 `line`）不畫。
+在 canvas 上先畫灰底方塊（`fillStroke`），再依序畫每個文字串的每個字形：`Path2D(字形輪廓)`，`setTransform` 用文字串的 `transform` 加上該字形的 `xPosition`，再依 `fontSize / unitsPerEm` 縮放，乘上 `rasterScale`。背景用 `page.fillColor`，字用 `run.textColor`。插圖和底線（連結的 `linkLine`、一般的 `line`）不畫。canvas 要用 `willReadFrequently: true`（軟體繪製，跟閱讀器的圖一樣 256 階反鋸齒）；GPU 繪製的字邊只有 5 階灰，瀏覽器縮放 110%（`rasterScale` 2.2）時有 4.5% 的像素不同，整本書都認不出來。
 
 實測（見 page-pipeline-v2.md §2.4）：這樣畫出來的跟閱讀器顯示的圖，插圖以外**逐像素相同**，白、米色、深色三種主題和單欄、雙欄都一樣。
 

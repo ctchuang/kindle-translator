@@ -224,7 +224,9 @@ function pageParagraphs(page) {
 // whatever the theme, and no boxes, which OCR reads best.
 function renderPage(page, fonts, scale, paths = new Map(), { plain = false } = {}) {
   const canvas = new OffscreenCanvas(Math.round(page.width * scale), Math.round(page.height * scale));
-  const ctx = canvas.getContext("2d");
+  // Drawn in software, like the reader's image: a GPU canvas smooths glyph
+  // edges in only five shades (at 110% zoom 4.5% of the pixels then differ).
+  const ctx = canvas.getContext("2d", { willReadFrequently: true });
   ctx.fillStyle = plain ? "#ffffff" : cssColor(page.fillColor, "#ffffff");
   ctx.fillRect(0, 0, canvas.width, canvas.height);
   if (!plain) {
