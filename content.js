@@ -379,6 +379,8 @@ function ensureToggle() {
   document.getElementById("kindle-translator-toggle")?.remove();
   toggle = document.createElement("button");
   toggle.id = "kindle-translator-toggle";
+  toggle.setAttribute("translate", "no");
+  toggle.classList.add("notranslate");
   Object.assign(toggle.style, {
     position: "fixed",
     right: "16px",
@@ -418,6 +420,10 @@ function ensureRoot() {
   document.getElementById("kindle-translator-overlay")?.remove(); // left by a script orphaned by a reload
   root = document.createElement("div");
   root.id = "kindle-translator-overlay";
+  // Already translated: Chrome's page translation, if turned on, would
+  // translate it again (bitumen 瀝青 came out as 標籤).
+  root.setAttribute("translate", "no");
+  root.classList.add("notranslate");
   Object.assign(root.style, {
     position: "fixed",
     inset: "0",

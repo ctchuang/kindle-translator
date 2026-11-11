@@ -1000,6 +1000,17 @@ test("an overlay first drawn while the switch is off starts hidden", async (t) =
   assert.equal(s.overlay().style.display, "none");
 });
 
+test("Chrome's page translation leaves the overlay and the button alone", async (t) => {
+  const s = setup(t);
+  await deliver(s, L, 0, 6);
+  const shown = (await show(s, L, 0)).page;
+  draw(s, overlayMsg(shown, BLOCKS));
+  for (const el of [s.overlay(), s.toggle()]) {
+    assert.equal(el.getAttribute("translate"), "no");
+    assert.ok(el.classList.contains("notranslate"));
+  }
+});
+
 test("a button and overlay left by an orphaned script are replaced", async (t) => {
   const s = setup(t, { html: READER_HTML.replace("</body>", '<button id="kindle-translator-toggle">old</button><div id="kindle-translator-overlay"><div></div></div></body>') });
   await waitFor(() => s.toggle()?.textContent === "顯示原文", { what: "new toggle" });
