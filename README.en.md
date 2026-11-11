@@ -62,6 +62,7 @@ Translations are kept per paragraph, by the paragraph's position in the book, wh
 
 ## Release notes
 
+- **2.4.2**: with Chrome's “translate this page” turned on by mistake, the translation drawn over the page is no longer translated again into other words. The name list no longer keeps a name left untranslated (“Solon → Solon”), and one kept before is no longer used, so a later correct translation (“梭倫”) isn't turned back into the original.
 - **2.4.1**: on some computers 2.4.0 had every screen fail with “閱讀器的頁面資料裡找不到目前這一頁” (the screen isn't found in the reader's page data); screens are now found whatever the zoom and the computer. The comparison no longer asks glyph edges to be shaded exactly alike (computers shade them differently), only for the glyphs to be in the same place.
 - **2.4.0**: with the browser zoomed (110%, say), screens no longer all fail with “閱讀器的頁面資料裡找不到目前這一頁” (the screen isn't found in the reader's page data). The screens compared are now drawn in software, as the reader draws its own, so the glyph edges match.
 - **2.3.2**: screens with underlined book titles (the reader's plain underlines, not a link's) no longer fail with “閱讀器的頁面資料裡找不到目前這一頁” (the screen isn't found in the reader's page data); a screen that's slightly off but clearly the one shown is still found, and the log says so. When none is found, the log adds a line (“辨識不到：…”) saying why.
