@@ -120,16 +120,19 @@ const NAMES_MAX = 500;
 // name is split into its given name and surname (splitNames), so the list
 // can't hold "Wiggin → 懷金" and "Ender Wiggin → 安德・維金" side by side; a
 // full name listed before (2.3.0's first build kept them) is dropped. A
-// name already listed keeps its translation, so the first one sticks; a
-// different one comes back in `conflicts`. Returns { names, added,
-// conflicts }.
+// name left untranslated (Solon → Solon) isn't kept, nor kept listed, so
+// it can't hold off the translation a later page gives. A name already
+// listed keeps its translation, so the first one sticks; a different one
+// comes back in `conflicts`. Returns { names, added, conflicts }.
 function mergeNames(stored, found, now) {
   const names = {};
-  for (const [source, n] of Object.entries(stored || {})) if (!/\s/.test(source) && now - n.savedAt <= NAMES_MAX_AGE_MS) names[source] = n;
+  for (const [source, n] of Object.entries(stored || {})) {
+    if (!/\s/.test(source) && !untranslated(source, n.text) && now - n.savedAt <= NAMES_MAX_AGE_MS) names[source] = n;
+  }
   const added = [];
   const conflicts = [];
   for (const { source, text } of splitNames(found)) {
-    if (!source || !text || source.length > 60 || text.length > 30) continue;
+    if (!source || !text || source.length > 60 || text.length > 30 || untranslated(source, text)) continue;
     const had = names[source];
     if (had) {
       if (had.text !== text) conflicts.push({ source, text, kept: had.text });
@@ -145,6 +148,10 @@ function mergeNames(stored, found, now) {
     for (const k of keys.slice(0, keys.length - NAMES_MAX)) delete names[k];
   }
   return { names, added, conflicts };
+}
+
+function untranslated(source, text) {
+  return source.toLowerCase() === text.toLowerCase();
 }
 
 // Names as single words: "Mazer Rackham" → "梅澤·拉克姆" gives Mazer → 梅澤

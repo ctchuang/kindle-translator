@@ -169,6 +169,13 @@ test.describe("mergeNames", () => {
     assert.deepEqual(Object.keys(out.names), ["Recent"]);
   });
 
+  test("a name left untranslated isn't kept, and gives way to a translation", () => {
+    const out = C.mergeNames({ Solon: { text: "Solon", savedAt: 1 } }, [{ source: "Solon", text: "梭倫" }, { source: "Euclid", text: "euclid" }], 2);
+    assert.deepEqual(out.names, { Solon: { text: "梭倫", savedAt: 2 } });
+    assert.deepEqual(out.added, [{ source: "Solon", text: "梭倫" }]);
+    assert.deepEqual(out.conflicts, []);
+  });
+
   test("blank, missing or overlong entries are skipped", () => {
     const out = C.mergeNames({}, [{ source: "", text: "空" }, { source: "X", text: " " }, null, { source: "A".repeat(61), text: "長" }, { source: "Bean", text: "豆子".repeat(16) }], 1);
     assert.deepEqual(out.names, {});
